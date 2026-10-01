@@ -43,7 +43,7 @@ object PermissionHelper {
         val expected = "${context.packageName}/com.sqlai.assistant.service.SqlNotificationListener"
         val enabled = Settings.Secure.getString(
             context.contentResolver,
-            Settings.Secure.ENABLED_NOTIFICATION_LISTENERS
+            "enabled_notification_listeners"
         ) ?: return false
         return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
     }

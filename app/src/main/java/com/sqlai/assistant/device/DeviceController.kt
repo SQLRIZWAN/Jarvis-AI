@@ -70,8 +70,9 @@ object DeviceController {
             "close_app" -> {
                 val pkg = resolvePackage(action.app.orEmpty())
                 if (pkg != null) {
-                    val pm = app.packageManager
-                    pm.killBackgroundProcesses(pkg)
+                    val activityManager =
+                        app.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                    activityManager.killBackgroundProcesses(pkg)
                     LogBus.log("Closed $pkg", LogLevel.SUCCESS)
                 }
             }
@@ -251,7 +252,7 @@ object DeviceController {
             val camera = app.getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val cameraId = camera.cameraIdList.firstOrNull { id ->
                 camera.getCameraCharacteristics(id)
-                    .get(CameraManager.FLASH_INFO_AVAILABLE) == true
+                    .get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
             } ?: return
             camera.setTorchMode(cameraId, on)
             LogBus.log(if (on) "Flashlight ON" else "Flashlight OFF", LogLevel.SUCCESS)

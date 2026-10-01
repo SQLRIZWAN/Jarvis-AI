@@ -279,7 +279,16 @@ class SqlAccessibilityService : AccessibilityService() {
         }
         val focused = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
         return try {
-            focused.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER)
+            // ACTION_IME_ENTER is not public API - append a newline instead,
+            // which most editors and message boxes treat as "send/enter".
+            val current = focused.text?.toString().orEmpty()
+            val args = Bundle().apply {
+                putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    current + "\n"
+                )
+            }
+            focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
         } catch (e: Exception) {
             false
         }
@@ -301,7 +310,7 @@ class SqlAccessibilityService : AccessibilityService() {
             val accepted = try {
                 dispatchGesture(
                     gesture,
-                    object : GestureDescription.GestureResultCallback() {
+                    object : AccessibilityService.GestureResultCallback() {
                         override fun onCompleted(gestureDescription: GestureDescription?) {
                             if (continuation.isActive) continuation.resume(true)
                         }

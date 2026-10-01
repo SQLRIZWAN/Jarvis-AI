@@ -67,9 +67,11 @@ object OverlayManager {
     }
 
     private fun addView(context: Context, view: View) {
-        val wm = windowManager
-            ?: context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-                .also { windowManager = it }
+        val wm = windowManager ?: run {
+            val created = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            windowManager = created
+            created
+        }
 
         if (view.parent != null) return
 
