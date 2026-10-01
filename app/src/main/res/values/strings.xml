@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SQL AI</string>
+    <string name="app_tagline">Your 24/7 Phone-Control AI Assistant</string>
+
+    <string name="accessibility_service_label">SQL AI Screen Control</string>
+    <string name="accessibility_service_desc">SQL AI uses this service to read what is on your screen and perform taps, swipes and typing so it can control your phone from voice commands like \"SQL, open WhatsApp and message Ali\". No screen content ever leaves your device unless you ask the assistant to act on it.</string>
+
+    <string name="notification_listener_label">SQL AI Notification Access</string>
+    <string name="notification_listener_desc">Allows SQL AI to read your notifications so it can read them aloud and reply on your behalf when you ask.</string>
+
+    <string name="notification_channel_service">SQL AI Background Service</string>
+    <string name="notification_channel_alerts">SQL AI Alerts</string>
+    <string name="notification_service_title">SQL AI is listening</string>
+    <string name="notification_service_text">Say \"SQL\" followed by your command</string>
+</resources>
