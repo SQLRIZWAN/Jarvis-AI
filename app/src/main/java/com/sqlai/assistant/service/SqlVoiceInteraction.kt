@@ -1,5 +1,6 @@
 package com.sqlai.assistant.service
 
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -25,7 +26,7 @@ class SqlVoiceInteractionService : VoiceInteractionService() {
 /** Hosts the session object the framework talks to. */
 class SqlVoiceInteractionSessionService : VoiceInteractionSessionService() {
 
-    override fun onGetSession(): VoiceInteractionSession =
+    override fun onNewSession(args: Bundle?): VoiceInteractionSession =
         SqlVoiceInteractionSession(this)
 }
 
@@ -33,62 +34,37 @@ class SqlVoiceInteractionSessionService : VoiceInteractionSessionService() {
  * Receives HOME long-press / power-assist events and hands them to the
  * always-on listening pipeline as an immediate command capture.
  */
-class SqlVoiceInteractionSession(context: android.content.Context) :
-    VoiceInteractionSession(context) {
+class SqlVoiceInteractionSession(context: Context) : VoiceInteractionSession(context) {
 
-    private val appContext: android.content.Context = context.applicationContext
+    private val appContext: Context = context.applicationContext
     private val handler = Handler(Looper.getMainLooper())
 
-    override fun onShow(args: Bundle?) {
-        super.onShow(args)
+    override fun onShow(args: Bundle?, showFlags: Int) {
+        super.onShow(args, showFlags)
         LogBus.log("Default assistant triggered (HOME / power)", LogLevel.SUCCESS)
+
+        // Arm the mic loop so the very next utterance becomes the command.
         ListeningService.trigger(appContext)
 
-        // Surface the app so the user gets visible feedback if overlay
-        // permission was not granted yet.
-        handler.postDelayed({
-            try {
-                val intent = Intent(appContext, MainActivity::class.java).apply {
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK or
-                            Intent.FLAG_ACTIVITY_SINGLE_TOP
-                    )
+        // Surface the app so the user gets visible feedback even if the
+        // overlay permission has not been granted yet.
+        handler.postDelayed(
+            {
+                try {
+                    val intent = Intent(appContext, MainActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    }
+                    appContext.startActivity(intent)
+                } catch (e: Exception) {
+                    LogBus.log("Assist UI failed: ${e.message}", LogLevel.WARN)
                 }
-                appContext.startActivity(intent)
-            } catch (e: Exception) {
-                LogBus.log("Assist UI failed: ${e.message}", LogLevel.WARN)
-            }
-            finish()
-        }, 900)
+                finish()
+            },
+            900
+        )
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onHandleAssist(data: AssistData?) {
-        super.onHandleAssist(data)
-        val query = try {
-            data?.data?.getString("query")
-                ?: data?.data?.getString("voice_interaction_query")
-        } catch (e: Exception) {
-            null
-        }
-        if (!query.isNullOrBlank()) {
-            ListeningService.runCommand(appContext, query)
-        }
-    }
-
-    override fun onCommand(command: Bundle?) {
-        val text = command?.getString("android.voice_interaction.extra.VOICE_COMMAND")
-            ?: command?.getStringArrayList("android.speech.extra.RESULTS")?.firstOrNull()
-        if (!text.isNullOrBlank()) {
-            ListeningService.runCommand(appContext, text)
-        } else {
-            ListeningService.trigger(appContext)
-        }
+    override fun onBackPressed() {
         finish()
-    }
-
-    override fun onBackPressed(): Boolean {
-        finish()
-        return true
     }
 }
