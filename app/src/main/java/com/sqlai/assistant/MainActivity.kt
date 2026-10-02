@@ -57,6 +57,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // v5: keep the accessibility/battery watchdog alive while the UI runs.
+        com.sqlai.assistant.service.AccessibilityWatchdogService.start(this)
         enableEdgeToEdge()
 
         requestRuntimePermissions()

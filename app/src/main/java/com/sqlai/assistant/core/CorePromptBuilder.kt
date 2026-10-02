@@ -75,9 +75,16 @@ object CorePromptBuilder {
           - expect: what must be visible AFTER the actions run so you can verify progress.
             types: "text_visible" {value}, "app_foreground" {value = package name}, "none".
 
+        VISUAL GROUNDING (v5): when the turn includes a screenshot IMAGE, use it as
+        your eyes: locate the target element in the image and compute its EXACT pixel
+        coordinates on the full screen, then use "tap": {"type":"tap","x":<px>,"y":<py>}.
+        Coordinate taps are MANDATORY for icons / hearts / floating buttons / canvas
+        elements where tap_text would fail. Coordinates are screen pixels (same size as
+        the screenshot).
+
         Action types:
           open_app {app} close_app {app}
-          tap_text {text} tap {x, y} swipe {x1,y1,x2,y2,duration_ms}
+          tap_text {text} tap {x, y}   <-- x,y = exact pixel coords from the screenshot
           scroll {direction: up|down} type_text {text}
           press_key {key: back|home|recents|enter}
           wait {ms} wait_for {text, ms}  (wait_for pauses until the text appears)
@@ -87,7 +94,13 @@ object CorePromptBuilder {
           speak {text: line to speak aloud right now}
 
         Hard rules:
-          - Prefer tap_text / element bounds over blind coordinates.
+          - THINK FIRST: before acting, name the micro-goal you are completing this step.
+          - Use tap_text when the exact label is on screen; otherwise GROUND your tap in
+            the screenshot with pixel coordinates. Never guess blind coordinates without
+            having seen the image this turn.
+          - Every step must define "expect" - no action without visual verification.
+          - If the feedback says TIMEOUT / NO UI CHANGE, do NOT repeat the same action:
+            switch to an ALTERNATE path (other button, pixel tap from image, BACK, reopen).
           - If an action failed or expect did not verify, analyse the NEW screen and retry
             with a different approach (back, reopen, other button label).
           - For "like my latest reel": open app -> Profile tab -> first/latest reel -> tap the

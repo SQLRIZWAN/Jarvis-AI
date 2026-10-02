@@ -8,6 +8,7 @@ import android.speech.tts.Voice
 import android.util.Log
 import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.ai.GeminiLiveAudioEngine
+import com.sqlai.assistant.ai.GeminiMaleVoiceStreamer
 import com.sqlai.assistant.core.AppSettings
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
@@ -157,7 +158,20 @@ object Speaker {
         val settings = SqlAiApp.settings.settings.first()
         if (!settings.ttsEnabled) return
 
-        // ---- preferred: Gemini native audio (Live API) --------------------
+        // ---- preferred 1: Gemini MALE voice streamer (v5 enforced) --------
+        // Direct WebSocket native audio, hardcoded Puck/Fenrir male profile.
+        // Android TTS is bypassed whenever this delivers.
+        if (GeminiMaleVoiceStreamer.isUsable(settings)) {
+            setLiveSpeaking(true)
+            val ok = try {
+                GeminiMaleVoiceStreamer.speak(settings, text)
+            } finally {
+                setLiveSpeaking(false)
+            }
+            if (ok) return
+        }
+
+        // ---- preferred 2: Gemini Live engine (call / duplex contexts) -----
         if (GeminiLiveAudioEngine.isUsable(settings)) {
             setLiveSpeaking(true)
             val ok = try {
@@ -166,7 +180,7 @@ object Speaker {
                 setLiveSpeaking(false)
             }
             if (ok) return
-            LogBus.log("Gemini Live unavailable - using Android TTS fallback", LogLevel.WARN)
+            LogBus.log("Gemini voices unavailable - Android TTS last resort", LogLevel.WARN)
         }
 
         // ---- fallback: Android TTS ----------------------------------------

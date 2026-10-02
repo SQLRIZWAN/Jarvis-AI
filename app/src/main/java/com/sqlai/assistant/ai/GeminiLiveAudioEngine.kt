@@ -59,6 +59,10 @@ object GeminiLiveAudioEngine {
 
     private const val TAG = "GeminiLive"
 
+    /** Enforced male profiles for the v5 voice identity. */
+    private val MALE_VOICES = setOf("Puck", "Charon", "Fenrir")
+    private const val MALE_VOICE = "Puck"
+
     enum class LiveState { IDLE, CONNECTING, READY, SPEAKING, LISTENING, ERROR }
 
     private const val WS_URL =
@@ -227,11 +231,13 @@ object GeminiLiveAudioEngine {
         if (connected && webSocket != null && setupDone) return true
         val key = settings.apiKey
         val model = settings.effectiveModel().ifBlank { "gemini-live-2.5-flash-preview" }
-        val voice = if (settings.liveVoiceName.isNotBlank()) {
-            settings.liveVoiceName
-        } else {
+        // v5: MALE voice profile is ENFORCED - any female/fallback selection
+        // (Kore, Aoede, Leda or device TTS defaults) is coerced to Puck so
+        // the assistant never speaks with the female default voice again.
+        val requested = settings.liveVoiceName.ifBlank {
             if (settings.voiceGender == VoiceGender.FEMALE) "Kore" else "Puck"
         }
+        val voice = if (requested in MALE_VOICES) requested else MALE_VOICE
         val prompt = com.sqlai.assistant.core.CorePromptBuilder.voice(settings)
 
         activeKey = key

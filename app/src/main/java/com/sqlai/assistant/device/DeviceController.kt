@@ -38,6 +38,10 @@ object DeviceController {
             try {
                 LogBus.log("Action ${index + 1}/${actions.size}: ${describe(action)}")
                 perform(action)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 5s step timeout / agent stop - abort the WHOLE batch at once,
+                // never swallow the cancel (it would keep firing actions).
+                throw e
             } catch (e: Exception) {
                 LogBus.log("Action failed (${action.type}): ${e.message}", LogLevel.ERROR)
             }
@@ -93,7 +97,11 @@ object DeviceController {
             "tap" -> {
                 val x = action.x
                 val y = action.y
-                if (x != null && y != null) accessibility?.tap(x, y)
+                if (x != null && y != null) {
+                    // Visual-grounding path: exact pixel dispatch, clamped to
+                    // the real display so vision coords can never miss screen.
+                    CoordinateGestureExecutor.tap(x, y)
+                }
                 delay(300)
             }
 
@@ -101,7 +109,7 @@ object DeviceController {
                 val x1 = action.x1(); val y1 = action.y1()
                 val x2 = action.x2(); val y2 = action.y2()
                 if (x1 != null && y1 != null && x2 != null && y2 != null) {
-                    accessibility?.swipe(x1, y1, x2, y2, action.durationMs ?: 300)
+                    CoordinateGestureExecutor.swipe(x1, y1, x2, y2, action.durationMs ?: 300)
                 }
                 delay(300)
             }

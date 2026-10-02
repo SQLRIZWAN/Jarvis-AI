@@ -9,7 +9,7 @@ taps, swipes and typing for you.
 | | |
 |---|---|
 | Repository | `Jarvis-AI` |
-| App name | **SQL AI v4.0 Pro** (dynamic, version-stamped) |
+| App name | **SQL AI v5.0 Ultimate Agent** (dynamic, version-stamped) |
 | Package | `com.sqlai.assistant` |
 | Language | Kotlin + Jetpack Compose |
 | Min SDK | 26 (Android 8.0) |
@@ -17,6 +17,38 @@ taps, swipes and typing for you.
 | License | MIT |
 
 ---
+
+## What's new in v5.0
+
+- **Anti-freeze 5-second step timeout** - `SQLAgentCoreV5.kt` wraps every
+  action batch in a hard 5 s deadline. A stalled step never freezes the
+  agent: it is logged as a soft-failure, the screen is re-parsed fresh, BACK
+  is pressed every 4th stall to escape dead-ends, and the model is forced
+  onto an alternate execution path (`TIMEOUT / NO UI CHANGE` feedback).
+- **Visual Grounding Engine** - screenshots feed Gemini Vision so it emits
+  EXACT pixel `tap {x,y}` targets; `CoordinateGestureExecutor.kt` dispatches
+  them through `dispatchGesture()` with real-display clamping - icons,
+  hearts, floating buttons and canvas UI hit at 100% accuracy. Strict
+  sequence lock: capture -> vision plan -> coordinate action -> UI-delta
+  verify; no action without visual verification.
+- **Autonomous goal decomposition** - before touching the screen the agent
+  plans an ordered micro-goal tree (deep-thinking pass) and announces it.
+  Every step carries a ReAct thought + progress reply.
+- **Gemini MALE voice enforced** - `GeminiMaleVoiceStreamer.kt` is a direct
+  Live-WebSocket native-audio client hardcoded to the **Puck/Fenrir male
+  profile**; Android TTS (the "female default voice" bug) is bypassed
+  entirely and only remains as a logged last resort. The Live engine also
+  coerces any female selection back to Puck.
+- **Interruption that feels natural** - speaking mid-task instantly PAUSES
+  Loop B, answers you with full chat memory + live screen context, then
+  resumes the task exactly where it stopped ("SQL stop" still aborts).
+- **Unbreakable accessibility + battery watchdog** -
+  `AccessibilityWatchdogService.kt` (typed foreground service, Android
+  10-17): polls `Settings.Secure` for the accessibility service, fires a
+  full-screen-intent restore notification the moment it is revoked, waits
+  the system re-bind when merely unbound, restarts a dead listening
+  pipeline, and **auto-fixes battery optimization** whenever Android
+  silently re-enables it (direct dialog + persistent alert).
 
 ## What's new in v4.0
 

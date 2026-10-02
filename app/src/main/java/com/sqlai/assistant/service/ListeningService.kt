@@ -107,6 +107,8 @@ class ListeningService : Service() {
     override fun onCreate() {
         super.onCreate()
         Speaker.init(this)
+        // v5: guardian watching accessibility + battery + this pipeline.
+        AccessibilityWatchdogService.start(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
