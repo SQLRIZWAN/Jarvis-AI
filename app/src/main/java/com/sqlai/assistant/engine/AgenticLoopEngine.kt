@@ -28,9 +28,11 @@ import java.io.ByteArrayOutputStream
  * long no-progress streak where verification keeps failing) - never a fixed
  * action counter.
  *
- * Background execution is deliberately SILENT: status voice lines are spoken
- * only for the first update and the final outcome, and the overlay command
- * text is throttled so continuous action execution never spams notifications.
+ * Voice feedback is LIVE but NON-BLOCKING: every distinct model status line
+ * ("Opening WhatsApp now...", "Searching for Mohan...", "Placing the call...")
+ * is pushed through [announce] (a fire-and-forget speech queue), so the
+ * executor and the voice bridge run truly in parallel - the loop never waits
+ * for TTS/Gemini round-trips, and speech never stalls automation.
  */
 object AgenticLoopEngine {
 
@@ -41,19 +43,22 @@ object AgenticLoopEngine {
     private const val MAX_TURNS = 20
 
     private var lastStateRefresh = 0L
-    private var spokenReplies = 0
 
-    suspend fun runTask(task: String, source: String) {
+    suspend fun runTask(
+        task: String,
+        source: String,
+        announce: (String) -> Unit = { Speaker.post(it) },
+        shouldStop: () -> Boolean = { false }
+    ) {
         val settings = SqlAiApp.settings.settings.first()
         val accessibility = SqlAccessibilityService.instance
 
         if (accessibility == null) {
             LogBus.log("Accessibility is off - agent cannot see the screen", LogLevel.ERROR)
-            Speaker.speak("Please enable the accessibility service first.")
+            Speaker.post("Please enable the accessibility service first.")
             return
         }
 
-        spokenReplies = 0
         lastStateRefresh = 0L
         LogBus.log("[$source] Agent started (unlimited loop): \"$task\"", LogLevel.SUCCESS)
         val conversation = ArrayList<ChatMessage>()
@@ -69,7 +74,7 @@ object AgenticLoopEngine {
         refreshState(task, force = true)
 
         // ---------------------------------------------------------- main loop
-        while (!completed) {
+        while (!completed && !shouldStop()) {
             step++
 
             // ---- OBSERVE --------------------------------------------------
@@ -101,7 +106,7 @@ object AgenticLoopEngine {
                 aiErrors++
                 LogBus.log("Agent AI error ($aiErrors/$AI_ERROR_LIMIT): ${e.message}", LogLevel.ERROR)
                 if (aiErrors >= AI_ERROR_LIMIT) {
-                    Speaker.speak("Sorry, the AI service is unavailable.")
+                    Speaker.post("Sorry, the AI service is unavailable.")
                     break
                 }
                 withContext(Dispatchers.IO) { kotlinx.coroutines.delay(1200) }
@@ -113,10 +118,8 @@ object AgenticLoopEngine {
             LogBus.log("Think #$step: ${plan.thought.take(MAX_THOUGHT_LOG)}")
             if (plan.reply.isNotBlank() && !plan.reply.equals(lastReply, ignoreCase = true)) {
                 lastReply = plan.reply
-                if (spokenReplies == 0 || plan.done) {
-                    spokenReplies++
-                    Speaker.speak(plan.reply)
-                }
+                // Live action feedback - non-blocking, serialized speech queue.
+                announce(plan.reply)
             }
 
             // ---- ACT ------------------------------------------------------
@@ -137,7 +140,7 @@ object AgenticLoopEngine {
                 if (verifyOk || plan.expectType == "none") {
                     completed = true
                     LogBus.log("Task COMPLETE after $step step(s): $task", LogLevel.SUCCESS)
-                    if (lastReply.isBlank()) Speaker.speak("Task completed.")
+                    if (lastReply.isBlank()) Speaker.post("Task completed.")
                     break
                 }
                 LogBus.log("Model said done but verification failed - continuing", LogLevel.WARN)
@@ -148,7 +151,7 @@ object AgenticLoopEngine {
                     "Agent stopped: no verification progress after $NO_PROGRESS_LIMIT attempts",
                     LogLevel.WARN
                 )
-                Speaker.speak("I could not complete that task.")
+                Speaker.post("I could not complete that task.")
                 break
             }
 
@@ -171,8 +174,8 @@ object AgenticLoopEngine {
             refreshState(task, force = false)
         }
 
-        spokenReplies = 0
         StateBus.setState(AssistantState.IDLE)
+        if (shouldStop()) LogBus.log("Agent stopped by user", LogLevel.WARN)
     }
 
     // ------------------------------------------------------------------ utils

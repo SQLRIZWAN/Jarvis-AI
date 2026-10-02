@@ -41,9 +41,13 @@ object CorePromptBuilder {
           open_settings {item: wifi|bluetooth|battery|display|sound|apps|accessibility}
           read_screen {}                 read_notifications {}
           wait {ms}
+          wa_call {text: contact name, message: "what to say over the call"}
+          speak {text: sentence to say aloud now}
 
         Rules: pick the shortest action path, never invent text that is not on screen,
         confirm in "reply" before acting, and if the command needs no action return an empty actions array.
+        "reply" is SPOKEN ALOUD IMMEDIATELY - make it a natural, useful confirmation
+        (the contact and app name in the user's language), not filler.
     """.trimIndent()
 
     /** Core rules for the autonomous multi-step agent loop. */
@@ -79,6 +83,8 @@ object CorePromptBuilder {
           wait {ms} wait_for {text, ms}  (wait_for pauses until the text appears)
           set_volume {value} volume_up {} volume_down {}
           read_notifications {} open_settings {item}
+          wa_call {text: contact name, message: "spoken line delivered live over the call"}
+          speak {text: line to speak aloud right now}
 
         Hard rules:
           - Prefer tap_text / element bounds over blind coordinates.
@@ -87,6 +93,13 @@ object CorePromptBuilder {
           - For "like my latest reel": open app -> Profile tab -> first/latest reel -> tap the
             heart (text or content-description "Like"). Verify by expecting "Unlike" or "Liked".
           - Never ask the user for anything you can find on screen.
+          - LIVE VOICE: every "reply" is SPOKEN ALOUD at once while you keep working.
+            On EACH step give a short, distinct progress line in the user's language
+            ("Opening WhatsApp now...", "Searching for Mohan...", "Placing the call...").
+            Never repeat the same line twice; never stay silent for more than 2 steps.
+          - WhatsApp calling: use wa_call with the on-screen contact name and put the
+            exact sentence the user wants delivered into "message".
+          - speak says any single line aloud without performing other actions.
           - When done, set done=true with empty actions and a final reply.
           - Keep going until the task is 100% complete; never give up after a fixed number of steps.
     """.trimIndent()

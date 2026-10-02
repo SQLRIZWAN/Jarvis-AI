@@ -21,7 +21,8 @@ data class Action(
     val key: String? = null,
     val on: Boolean? = null,
     val item: String? = null,
-    val ms: Int? = null
+    val ms: Int? = null,
+    val message: String? = null
 )
 
 data class Plan(
@@ -70,7 +71,8 @@ object PlanParser {
                     key = a.optStringOrNull("key"),
                     on = a.optBooleanOrNull("on"),
                     item = a.optStringOrNull("item"),
-                    ms = a.optIntOrNull("ms")
+                    ms = a.optIntOrNull("ms"),
+                    message = a.optStringOrNull("message")
                 )
             )
         }

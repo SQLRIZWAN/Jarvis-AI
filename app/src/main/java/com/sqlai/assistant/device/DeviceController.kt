@@ -12,9 +12,14 @@ import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.ai.Action
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
+import com.sqlai.assistant.ai.GeminiLiveAudioEngine
+import com.sqlai.assistant.core.AudioManagerController
+import com.sqlai.assistant.engine.Speaker
 import com.sqlai.assistant.service.SqlAccessibilityService
+import com.sqlai.assistant.service.WhatsAppCallAutomationHandler
 import com.sqlai.assistant.service.SqlNotificationListener
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 
 /**
  * Executes the AI's action plan: launches apps, drives the screen through the
@@ -49,6 +54,8 @@ object DeviceController {
         "toggle_flashlight" -> "flashlight=${action.on}"
         "open_settings" -> "settings:${action.item}"
         "wait" -> "wait ${action.ms}ms"
+        "wa_call" -> "wa_call ${action.text} -> ${action.message ?: "(no message)"}"
+        "speak" -> "speak \"${action.text}\""
         else -> action.type
     }
 
@@ -165,6 +172,33 @@ object DeviceController {
             "end_call" -> endCall()
 
             "answer_call" -> answerCall()
+
+            "wa_call" -> {
+                // WhatsApp voice call via vision workflow - the handler talks
+                // progress + the spoken message over the call, non-blocking.
+                WhatsAppCallAutomationHandler.placeCall(
+                    contact = action.text ?: action.app.orEmpty(),
+                    spokenMessage = action.message
+                )
+            }
+
+            "speak" -> {
+                val spoken = action.text.orEmpty()
+                if (spoken.isNotBlank()) {
+                    if (AudioManagerController.isCallMode()) {
+                        // Live over the active call stream (user's voice cfg).
+                        val liveSettings = try {
+                            SqlAiApp.settings.settings.first()
+                        } catch (e: Exception) {
+                            com.sqlai.assistant.core.AppSettings()
+                        }
+                        GeminiLiveAudioEngine.speakText(liveSettings, spoken)
+                    } else {
+                        // Fire-and-forget: never blocks the Loop B executor.
+                        Speaker.post(spoken)
+                    }
+                }
+            }
 
             else -> LogBus.log("Unknown action type: ${action.type}", LogLevel.WARN)
         }

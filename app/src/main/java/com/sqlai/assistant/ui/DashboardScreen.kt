@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -56,6 +57,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.sqlai.assistant.R
+import com.sqlai.assistant.BuildConfig
 import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.core.AssistantState
 import com.sqlai.assistant.core.LogBus
@@ -115,12 +118,16 @@ fun DashboardScreen() {
         ) {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("SQL AI", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        stringResource(R.string.app_name),
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                     Spacer(Modifier.width(8.dp))
                     StateBadge(state = state)
                 }
                 Text(
-                    "v1.2  ·  24/7 agentic phone assistant",
+                    "v${BuildConfig.VERSION_NAME}  ·  24/7 agentic phone assistant",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.outline
                 )

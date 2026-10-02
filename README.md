@@ -9,7 +9,7 @@ taps, swipes and typing for you.
 | | |
 |---|---|
 | Repository | `Jarvis-AI` |
-| App name | **SQL AI** |
+| App name | **SQL AI v4.0 Pro** (dynamic, version-stamped) |
 | Package | `com.sqlai.assistant` |
 | Language | Kotlin + Jetpack Compose |
 | Min SDK | 26 (Android 8.0) |
@@ -17,6 +17,38 @@ taps, swipes and typing for you.
 | License | MIT |
 
 ---
+
+## What's new in v4.0
+
+- **Mic freeze fix + exclusive mic ownership** - `AudioManagerController.kt`
+  is the single source of truth for the microphone: one owner at a time
+  (STT / Gemini Live / call capture), audio focus with transient-exclusive
+  requests, call audio-mode switching. The wake-word loop can no longer
+  double-record, fight the live engine or spin in an endless recognizer
+  reopen loop (stuck-session detection, exponential error backoff, 25 s
+  speech-pause cap, generation-guarded mic loop in the live engine).
+- **Dual-loop parallel agent (true hands-free speed)** - `SQLAgentEngineV4.kt`
+  runs two asynchronous workers: **Loop A (voice bridge)** keeps speaking
+  live progress ("Opening WhatsApp now...", "Searching for Mohan...") through
+  a non-blocking speech queue while **Loop B (executor)** performs the
+  Observe -> Think -> Act -> Verify task on Dispatchers.IO. The wake-word
+  listener stays armed during execution - you can interrupt with
+  **"SQL stop"** (graceful step-level cancellation) without ever blocking
+  automation on TTS/Gemini round-trips.
+- **WhatsApp one-shot calling with live talk-back** -
+  `WhatsAppCallAutomationHandler.kt` (new `wa_call` action): open WhatsApp ->
+  search contact -> tap Voice call -> vision-poll for connection (in-call
+  controls/timer) -> deliver the spoken message over the call via Gemini Live
+  duplex (TTS fallback), with per-stage oral progress, retries on fresh
+  screen parses and a hard timeout - it never throws or freezes the voice
+  thread. A new `speak` action says any line aloud (call stream when in a
+  call).
+- **Live spoken progress everywhere** - the agent speaks every distinct
+  status reply immediately (queued, never blocking) instead of only the first
+  and final line; the dashboard shows the latest progress text in real time.
+- **Dynamic app name / version** - `build.gradle.kts` stamps the launcher
+  label from `versionName` (`SQL AI v4.0 Pro`); the dashboard badge shows
+  `BuildConfig.VERSION_NAME`. Adding a release version is now a one-line bump.
 
 ## What's new in v1.2
 

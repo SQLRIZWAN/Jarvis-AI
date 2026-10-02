@@ -19,6 +19,7 @@ import androidx.core.app.ServiceCompat
 import com.sqlai.assistant.R
 import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.core.AssistantState
+import com.sqlai.assistant.core.AudioManagerController
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.core.StateBus
@@ -95,8 +96,10 @@ class ListeningService : Service() {
     @Volatile private var running = false
     @Volatile private var wasRunning = false
     @Volatile private var isListening = false
-    @Volatile private var processing = false
     @Volatile private var awaitingCommand = false
+    @Volatile private var listeningSince = 0L
+    @Volatile private var consecutiveErrors = 0
+    @Volatile private var speechPauseSince = 0L
     @Volatile private var awaitingAttempts = 0
     @Volatile private var cachedWakeWord = "sql"
     @Volatile private var cachedLanguageTag = "en-IN"
@@ -117,14 +120,12 @@ class ListeningService : Service() {
                 val text = intent.getStringExtra(EXTRA_TEXT).orEmpty()
                 promoteToForeground()
                 if (text.isNotBlank()) {
-                    processing = true
                     StateBus.setCommand(text)
                     LogBus.log("Assist command: \"$text\"")
-                    scope.launch {
-                        AssistantEngine.executeBlocking(text, "assist")
-                        processing = false
-                        resumeIdle()
-                    }
+                    // Loop B (task executor) runs in parallel - Loop A (voice
+                    // bridge) re-arms immediately instead of blocking here.
+                    AssistantEngine.execute(text, "assist")
+                    scheduleNext(900)
                 }
                 return START_NOT_STICKY
             }
@@ -136,7 +137,7 @@ class ListeningService : Service() {
                 StateBus.setState(AssistantState.LISTENING)
                 LogBus.log("Assist triggered - waiting for your command")
                 cancelRecognition()
-                mainHandler.post { startRecognition() }
+                mainHandler.postDelayed({ startRecognition() }, 150)
                 return START_STICKY
             }
 
@@ -259,6 +260,17 @@ class ListeningService : Service() {
 
     private fun observeSettings() {
         if (settingsJob != null) return
+        // Mic preemption: when the call/live engine takes the mic, stop our
+        // recognizer session immediately (prevents dual-recording).
+        scope.launch {
+            AudioManagerController.micOwner.collect { owner ->
+                if (owner != AudioManagerController.MicOwner.NONE &&
+                    owner != AudioManagerController.MicOwner.STT && isListening
+                ) {
+                    cancelRecognition()
+                }
+            }
+        }
         settingsJob = scope.launch {
             SqlAiApp.settings.settings.collect { settings ->
                 cachedWakeWord = settings.wakeWord.ifBlank { "sql" }
@@ -297,7 +309,6 @@ class ListeningService : Service() {
     private fun stopEverything() {
         running = false
         awaitingCommand = false
-        processing = false
         mainHandler.removeCallbacksAndMessages(null)
         cancelRecognition()
         try {
@@ -322,14 +333,53 @@ class ListeningService : Service() {
     private val watchdog = object : Runnable {
         override fun run() {
             if (!running) return
-            if (!isListening && !processing) startRecognition()
-            mainHandler.postDelayed(this, 5000)
+            if (isListening) {
+                // Frozen session detector: a SpeechRecognizer that never
+                // returns results is force-restarted instead of hanging.
+                if (System.currentTimeMillis() - listeningSince > 9000) {
+                    LogBus.log("STT session stuck - restarting recognizer", LogLevel.WARN)
+                    endSession()
+                    destroyRecognizer()
+                }
+            } else if (!speechPauseActive() && micAvailable()) {
+                startRecognition()
+            }
+            mainHandler.postDelayed(this, 2500)
         }
     }
 
+    /** True while the assistant itself is speaking (avoid self-hearing), capped. */
+    private fun speechPauseActive(): Boolean {
+        if (!Speaker.isSpeaking()) {
+            speechPauseSince = 0L
+            return false
+        }
+        val now = System.currentTimeMillis()
+        if (speechPauseSince == 0L) speechPauseSince = now
+        // Hard cap: never let speech pause the mic for more than 25 s.
+        if (now - speechPauseSince > 25_000) {
+            speechPauseSince = 0L
+            return false
+        }
+        return true
+    }
+
+    private fun micAvailable(): Boolean {
+        val owner = AudioManagerController.micOwner.value
+        return owner == AudioManagerController.MicOwner.NONE ||
+            owner == AudioManagerController.MicOwner.STT
+    }
+
     private fun startRecognition() {
-        if (!running || isListening || processing) return
+        if (!running || isListening) return
+        if (speechPauseActive()) return
         if (!SpeechRecognizer.isRecognitionAvailable(this)) return
+        // Exclusive mic ownership - never double-record with the live engine.
+        // acquireMic applies the preemption rule (STT may be taken from none;
+        // Gemini Live / call capture blocks STT until they release).
+        if (!AudioManagerController.acquireMic(this, AudioManagerController.MicOwner.STT)) {
+            return
+        }
 
         try {
             val current = recognizer ?: SpeechRecognizer.createSpeechRecognizer(this).also {
@@ -348,12 +398,36 @@ class ListeningService : Service() {
             current.setRecognitionListener(recognitionListener)
             current.startListening(intent)
             isListening = true
+            listeningSince = System.currentTimeMillis()
             StateBus.setState(AssistantState.LISTENING)
         } catch (e: Exception) {
             isListening = false
+            AudioManagerController.releaseMic(AudioManagerController.MicOwner.STT)
             LogBus.log("STT start failed: ${e.message}", LogLevel.WARN)
-            mainHandler.postDelayed({ if (running) startRecognition() }, 2000)
+            // Exponential backoff instead of a tight reopen loop.
+            val backoff = 1500L + consecutiveErrors.coerceAtMost(4) * 1000L
+            consecutiveErrors++
+            mainHandler.postDelayed({ if (running) startRecognition() }, backoff)
         }
+    }
+
+    /** Terminal bookkeeping for one recognition session. */
+    private fun endSession() {
+        isListening = false
+        listeningSince = 0L
+        AudioManagerController.releaseMic(AudioManagerController.MicOwner.STT)
+    }
+
+    private fun destroyRecognizer() {
+        try {
+            recognizer?.destroy()
+        } catch (e: Exception) {
+            // Ignore.
+        }
+        recognizer = null
+        isListening = false
+        consecutiveErrors = 0
+        if (running) mainHandler.postDelayed({ startRecognition() }, 400)
     }
 
     private fun cancelRecognition() {
@@ -362,11 +436,11 @@ class ListeningService : Service() {
         } catch (e: Exception) {
             // Ignore.
         }
-        isListening = false
+        endSession()
     }
 
     private fun scheduleNext(delayMs: Long = 450) {
-        mainHandler.postDelayed({ if (running && !processing) startRecognition() }, delayMs)
+        mainHandler.postDelayed({ if (running) startRecognition() }, delayMs)
     }
 
     private val recognitionListener = object : RecognitionListener {
@@ -374,7 +448,9 @@ class ListeningService : Service() {
         override fun onReadyForSpeech(params: Bundle?) = Unit
         override fun onBeginningOfSpeech() = Unit
         override fun onEndOfSpeech() {
-            isListening = false
+            // NOT terminal - onResults/onError will close the session.
+            // (Setting isListening=false here let the watchdog start a SECOND
+            // session while results were still in flight -> double-record.)
             StateBus.setLevel(0f)
         }
 
@@ -386,12 +462,12 @@ class ListeningService : Service() {
         override fun onBufferReceived(buffer: ByteArray?) = Unit
 
         override fun onError(error: Int) {
-            isListening = false
+            endSession()
             StateBus.setLevel(0f)
             when (error) {
                 SpeechRecognizer.ERROR_NO_MATCH,
                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
-                    Unit // Normal in always-on mode.
+                    consecutiveErrors = 0 // Normal in always-on mode.
 
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
                     LogBus.log("Microphone permission missing", LogLevel.ERROR)
@@ -399,26 +475,38 @@ class ListeningService : Service() {
                     running = false
                 }
 
-                else ->
+                else -> {
+                    consecutiveErrors++
                     LogBus.log("STT error code $error", LogLevel.WARN)
+                }
             }
-            scheduleNext(if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) 900 else 450)
+            // Exponential backoff: 450 -> 900 -> 1800 -> 3600 -> 5000 ms cap.
+            val backoff = if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                900L
+            } else {
+                val shift = consecutiveErrors.coerceIn(0, 4)
+                (450L shl shift).coerceAtMost(5000L)
+            }
+            // Repeated failures -> rebuild the recognizer from scratch.
+            if (consecutiveErrors >= 5) {
+                destroyRecognizer()
+            } else {
+                scheduleNext(backoff)
+            }
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
             val text = topResult(partialResults) ?: return
-            if (processing) return
+            // Wake word keeps evaluating DURING task execution (Loop A stays on)
+            // so the user can say "SQL stop" while the agent works.
             if (!awaitingCommand) evaluateWakeWord(text, isFinal = false)
         }
 
         override fun onResults(results: Bundle?) {
-            isListening = false
+            endSession()
             StateBus.setLevel(0f)
+            consecutiveErrors = 0
             val text = topResult(results).orEmpty()
-            if (processing) {
-                scheduleNext()
-                return
-            }
             val consumed = evaluateWakeWord(text, isFinal = true)
             if (!consumed) scheduleNext()
         }
@@ -517,20 +605,16 @@ class ListeningService : Service() {
             return
         }
         awaitingCommand = false
-        processing = true
         isListening = false
         cancelRecognition()
         StateBus.setState(AssistantState.PROCESSING)
         StateBus.setCommand(clean)
         LogBus.log("Command: \"$clean\"", LogLevel.SUCCESS)
 
-        scope.launch {
-            try {
-                AssistantEngine.executeBlocking(clean, "wake-word")
-            } finally {
-                processing = false
-                resumeIdle()
-            }
-        }
+        // DUAL-LOOP: hand the task to Loop B (executor) WITHOUT awaiting it,
+        // then immediately re-arm Loop A (voice bridge) so the assistant can
+        // keep listening / giving spoken progress while the task runs.
+        AssistantEngine.execute(clean, "wake-word")
+        scheduleNext(900)
     }
 }

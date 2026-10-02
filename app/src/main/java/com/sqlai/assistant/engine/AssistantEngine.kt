@@ -38,7 +38,8 @@ object HistoryStore {
 
 /**
  * Entry point of the assistant: keeps the state machine, single-flight mutex
- * and hands the actual work to the unlimited [AgenticLoopEngine] loop.
+ * and hands the actual work to the dual-loop parallel [SQLAgentEngineV4]
+ * (Loop A: voice bridge / Loop B: task executor).
  */
 object AssistantEngine {
 
@@ -60,6 +61,13 @@ object AssistantEngine {
     suspend fun executeBlocking(command: String, source: String) = run(command, source)
 
     private suspend fun run(command: String, source: String) {
+        // Voice/text stop command -> abort the running V4 task (graceful).
+        if (SQLAgentEngineV4.isRunning() && SQLAgentEngineV4.matchesCancel(command)) {
+            HistoryStore.addUser(command)
+            SQLAgentEngineV4.cancel()
+            return
+        }
+
         if (!mutex.tryLock()) {
             LogBus.log("Engine busy - ignored: \"$command\"", LogLevel.WARN)
             return
@@ -69,7 +77,9 @@ object AssistantEngine {
             StateBus.setCommand(command)
             HistoryStore.addUser(command)
 
-            AgenticLoopEngine.runTask(command, source)
+            // Dual-loop: V4 suspends until Loop B finishes while Loop A keeps
+            // feeding spoken progress from a separate worker.
+            SQLAgentEngineV4.run(command, source)
 
             HistoryStore.addAssistant("completed: $command")
             StateBus.setState(AssistantState.IDLE)

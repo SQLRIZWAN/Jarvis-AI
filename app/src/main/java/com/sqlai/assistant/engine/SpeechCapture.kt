@@ -8,6 +8,8 @@ import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import com.sqlai.assistant.core.AudioManagerController
+import com.sqlai.assistant.core.AudioManagerController.MicOwner
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
@@ -27,6 +29,13 @@ object SpeechCapture {
     ): String? {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) return null
 
+        // Mic-owner guard: if Gemini Live duplex (or an active call capture)
+        // already holds the microphone, yield instead of double-recording.
+        // STT may still be stolen - the call assistant needs the mic more.
+        if (!AudioManagerController.acquireMic(context, MicOwner.CALL_CAPTURE)) {
+            return null
+        }
+
         return suspendCancellableCoroutine { continuation ->
             val appContext = context.applicationContext
             val resumed = AtomicBoolean(false)
@@ -40,6 +49,7 @@ object SpeechCapture {
                     } catch (e: Exception) {
                         // ignore
                     }
+                    AudioManagerController.releaseMic(MicOwner.CALL_CAPTURE)
                     continuation.resume(result)
                 }
             }

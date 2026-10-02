@@ -12,12 +12,18 @@ import com.sqlai.assistant.core.AppSettings
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.core.VoiceGender
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
 
 /**
@@ -42,6 +48,71 @@ object Speaker {
     @Volatile
     private var callMode = false
 
+    /** Number of utterances currently in flight - drives isSpeaking(). */
+    private val activeUtterances = AtomicInteger(0)
+
+    @Volatile
+    private var speakingSince = 0L
+
+    @Volatile
+    private var liveSpeaking = false
+
+    /**
+     * Serialized speech queue (Loop A of the dual-loop agent): producers call
+     * [post] and return immediately so the task executor never blocks on TTS /
+     * Gemini Live round-trips. Order is preserved, no overlapping utterances.
+     */
+    private val speechScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val speechQueue = Channel<String>(capacity = 64)
+    @Volatile private var consumerStarted = false
+
+    /**
+     * NON-BLOCKING speak: enqueue and return immediately. Used by the agent
+     * executor for live action feedback ("Opening WhatsApp now...") so voice
+     * never stalls the automation loop (and vice versa).
+     */
+    fun post(text: String) {
+        if (text.isBlank()) return
+        speechQueue.trySend(text)
+        startQueueConsumer()
+    }
+
+    /** True while something is being spoken (TTS or Gemini Live). */
+    fun isSpeaking(): Boolean =
+        activeUtterances.get() > 0 || liveSpeaking ||
+            (System.currentTimeMillis() - speakingSince < 800 && speakingSince != 0L)
+
+    internal fun setLiveSpeaking(value: Boolean) {
+        liveSpeaking = value
+        if (value) speakingSince = System.currentTimeMillis()
+    }
+
+    internal fun markSpeechStart() {
+        activeUtterances.incrementAndGet()
+        speakingSince = System.currentTimeMillis()
+    }
+
+    internal fun markSpeechEnd() {
+        activeUtterances.updateAndGet { v -> (v - 1).coerceAtLeast(0) }
+    }
+
+    private fun startQueueConsumer() {
+        if (consumerStarted) return
+        synchronized(this) {
+            if (consumerStarted) return
+            consumerStarted = true
+            speechScope.launch {
+                for (text in speechQueue) {
+                    try {
+                        speak(text)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "queued speak failed", e)
+                    }
+                }
+            }
+        }
+    }
+
     fun init(context: Context) {
         if (tts != null) return
         synchronized(this) {
@@ -50,21 +121,27 @@ object Speaker {
                 val engine = tts ?: return@TextToSpeech
                 if (status == TextToSpeech.SUCCESS) {
                     engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                        override fun onStart(utteranceId: String?) = Unit
+                        override fun onStart(utteranceId: String?) {
+                            markSpeechStart()
+                        }
 
                         override fun onDone(utteranceId: String?) {
+                            markSpeechEnd()
                             utteranceId?.let { pendingUtterances.remove(it)?.invoke(true) }
                         }
 
                         @Deprecated("Deprecated in Java")
                         override fun onError(utteranceId: String?) {
+                            markSpeechEnd()
                             utteranceId?.let { pendingUtterances.remove(it)?.invoke(false) }
                         }
 
                         override fun onError(utteranceId: String?, errorCode: Int) {
+                            markSpeechEnd()
                             utteranceId?.let { pendingUtterances.remove(it)?.invoke(false) }
                         }
                     })
+                    startQueueConsumer()
                     ready = true
                     LogBus.log("Voice output (TTS) ready", LogLevel.SUCCESS)
                 } else {
@@ -82,7 +159,13 @@ object Speaker {
 
         // ---- preferred: Gemini native audio (Live API) --------------------
         if (GeminiLiveAudioEngine.isUsable(settings)) {
-            if (GeminiLiveAudioEngine.speakText(settings, text)) return
+            setLiveSpeaking(true)
+            val ok = try {
+                GeminiLiveAudioEngine.speakText(settings, text)
+            } finally {
+                setLiveSpeaking(false)
+            }
+            if (ok) return
             LogBus.log("Gemini Live unavailable - using Android TTS fallback", LogLevel.WARN)
         }
 
@@ -252,6 +335,11 @@ object Speaker {
     }
 
     fun shutdown() {
+        try {
+            speechQueue.close()
+        } catch (e: Exception) {
+            // Ignore.
+        }
         try {
             tts?.stop()
             tts?.shutdown()

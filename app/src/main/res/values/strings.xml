@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">SQL AI</string>
     <string name="app_tagline">Your 24/7 Phone-Control AI Assistant</string>
 
     <string name="accessibility_service_label">SQL AI Screen Control</string>

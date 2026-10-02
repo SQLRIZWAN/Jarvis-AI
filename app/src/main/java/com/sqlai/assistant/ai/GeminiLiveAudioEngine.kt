@@ -9,7 +9,9 @@ import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
+import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.core.AiProvider
+import com.sqlai.assistant.core.AudioManagerController
 import com.sqlai.assistant.core.AppSettings
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
@@ -37,6 +39,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Native Gemini audio output over the Live API (bidi WebSocket).
@@ -98,6 +101,16 @@ object GeminiLiveAudioEngine {
     private var track: AudioTrack? = null
     private val micRunning = AtomicBoolean(false)
 
+    /**
+     * Monotonic mic generation. Every startMic()/stopMic() bumps it, and a
+     * micLoop only runs while its captured generation is still current - so a
+     * fast stop->start cycle can NEVER leave an old AudioRecord loop alive
+     * alongside a new one (the double-recording freeze from v1.2).
+     */
+    private val micGeneration = AtomicLong(0L)
+
+    @Volatile private var lastStreamAt = 0L
+
     // ------------------------------------------------------------------ public
 
     /** True when the Gemini Live voice can be used with the current settings. */
@@ -135,17 +148,38 @@ object GeminiLiveAudioEngine {
         }
     }
 
-    /** Start streaming the microphone into the live session. */
+    /**
+     * Start streaming the microphone into the live session.
+     * Idempotent, ownership-checked (AudioManagerController) and generation
+     * guarded - safe to call repeatedly from call state callbacks.
+     */
     fun startMic() {
-        if (micRunning.getAndSet(true)) return
-        micJob = scope.launch { micLoop() }
+        val context = try { SqlAiApp.instance } catch (e: Exception) { null } ?: return
+        if (!AudioManagerController.canStartRecording(context, AudioManagerController.MicOwner.GEMINI_LIVE)) {
+            LogBus.log("Mic busy (${AudioManagerController.micOwner.value.name}) - live input paused", LogLevel.WARN)
+            return
+        }
+        val generation = micGeneration.incrementAndGet()
+        if (!micRunning.compareAndSet(false, true)) {
+            // Already streaming: the new generation invalidates the old loop,
+            // keep the single runner.
+            return
+        }
+        micJob = scope.launch { micLoop(generation) }
         _state.value = LiveState.LISTENING
     }
 
     fun stopMic() {
+        micGeneration.incrementAndGet() // invalidate any running loop NOW
         micRunning.set(false)
-        micJob?.cancel()
+        try {
+            micJob?.cancel()
+        } catch (e: Exception) {
+            // Ignore.
+        }
         micJob = null
+        AudioManagerController.releaseMic(AudioManagerController.MicOwner.GEMINI_LIVE)
+        if (_state.value == LiveState.LISTENING) _state.value = LiveState.IDLE
     }
 
     /**
@@ -154,12 +188,7 @@ object GeminiLiveAudioEngine {
      */
     fun enterCallMode(context: Context) {
         callMode = true
-        try {
-            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            am.mode = AudioManager.MODE_IN_COMMUNICATION
-        } catch (e: Exception) {
-            Log.w(TAG, "audio mode failed", e)
-        }
+        AudioManagerController.enterCallAudioMode(context, speakerphone = false)
         recreateTrack()
         startMic()
     }
@@ -168,12 +197,7 @@ object GeminiLiveAudioEngine {
         callMode = false
         stopMic()
         playQueue.clear()
-        try {
-            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            am.mode = AudioManager.MODE_NORMAL
-        } catch (e: Exception) {
-            // Ignore.
-        }
+        AudioManagerController.exitCallAudioMode(context)
         recreateTrack()
     }
 
@@ -577,54 +601,42 @@ object GeminiLiveAudioEngine {
 
     // ----------------------------------------------------------------- mic
 
-    private suspend fun micLoop() {
-        val record = try {
-            val source = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION
-            } else {
-                MediaRecorder.AudioSource.MIC
-            }
-            val minBuf = AudioRecord.getMinBufferSize(
-                INPUT_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            )
-            val rec = AudioRecord(
-                source,
-                INPUT_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                maxOf(minBuf, INPUT_RATE)
-            )
-            if (rec.state != AudioRecord.STATE_INITIALIZED) {
-                rec.release()
-                null
-            } else {
-                rec
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "AudioRecord failed", e)
-            null
-        }
+    private suspend fun micLoop(generation: Long) {
+        val record = openRecordWithRetry(generation)
         if (record == null) {
+            // Give up cleanly instead of re-opening forever (freeze fix).
             micRunning.set(false)
+            AudioManagerController.releaseMic(AudioManagerController.MicOwner.GEMINI_LIVE)
+            LogBus.log("Mic could not be opened - live input stopped", LogLevel.WARN)
             return
         }
         try {
             record.startRecording()
             val chunk = ByteArray(INPUT_RATE / 10 * 2) // 100 ms of PCM16 mono
-            while (micRunning.get()) {
+            while (micRunning.get() && micGeneration.get() == generation) {
                 var read = 0
-                while (read < chunk.size && micRunning.get()) {
+                while (read < chunk.size &&
+                    micRunning.get() &&
+                    micGeneration.get() == generation
+                ) {
                     val n = record.read(chunk, read, chunk.size - read)
                     if (n <= 0) break
                     read += n
                 }
+                if (micGeneration.get() != generation) break
                 if (read > 0) {
+                    lastStreamAt = System.currentTimeMillis()
                     val ws = webSocket
                     if (ws != null && connected) {
                         ws.sendBytes(audioMessage(chunk.copyOf(read)))
                     }
+                }
+                // Socket gone for >10 s? Release the mic instead of idling.
+                if ((!connected || webSocket == null) &&
+                    System.currentTimeMillis() - lastStreamAt > 10_000
+                ) {
+                    LogBus.log("Live socket idle - releasing mic", LogLevel.WARN)
+                    break
                 }
                 delay(20) // gentle pacing, avoids busy spin
             }
@@ -637,7 +649,51 @@ object GeminiLiveAudioEngine {
                 // Ignore.
             }
             record.release()
+            if (micGeneration.get() == generation) {
+                // Natural exit - hand the mic back.
+                AudioManagerController.releaseMic(AudioManagerController.MicOwner.GEMINI_LIVE)
+            }
         }
+    }
+
+    /** Max 2 attempts with a pause - never an infinite reopen loop. */
+    private suspend fun openRecordWithRetry(generation: Long): AudioRecord? {
+        repeat(2) { attempt ->
+            if (micGeneration.get() != generation) return null
+            val rec = openRecord()
+            if (rec != null) return rec
+            if (attempt == 0) delay(500)
+        }
+        return null
+    }
+
+    private fun openRecord(): AudioRecord? = try {
+        val source = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        } else {
+            MediaRecorder.AudioSource.MIC
+        }
+        val minBuf = AudioRecord.getMinBufferSize(
+            INPUT_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        val rec = AudioRecord(
+            source,
+            INPUT_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            maxOf(minBuf, INPUT_RATE)
+        )
+        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+            rec.release()
+            null
+        } else {
+            rec
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "AudioRecord open failed", e)
+        null
     }
 
     // ------------------------------------------------------------- playback
