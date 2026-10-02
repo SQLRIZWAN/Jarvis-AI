@@ -36,9 +36,17 @@ object AudioManagerController {
     private val _micOwner = MutableStateFlow(MicOwner.NONE)
     val micOwner: StateFlow<MicOwner> = _micOwner.asStateFlow()
 
+    @Volatile private var micSince = 0L
     @Volatile private var audioManager: AudioManager? = null
     @Volatile private var focusRequest: AudioFocusRequest? = null
     @Volatile private var callMode = false
+
+    /** How long the current owner has held the mic (0 when free). */
+    fun micHeldMs(): Long {
+        val since = micSince
+        return if (since == 0L || _micOwner.value == MicOwner.NONE) 0L
+        else System.currentTimeMillis() - since
+    }
 
     private fun am(context: Context): AudioManager? {
         audioManager?.let { return it }
@@ -72,6 +80,7 @@ object AudioManagerController {
                 // Voice-call paths preempt the background wake-word loop; the
                 // STT owner observes the owner change and cancels its session.
                 _micOwner.value = owner
+                micSince = System.currentTimeMillis()
                 Log.w(TAG, "Mic preempted: STT -> ${owner.name}")
                 requestFocus(context)
                 return true
@@ -81,6 +90,7 @@ object AudioManagerController {
                 return false
             }
             _micOwner.value = owner
+            micSince = System.currentTimeMillis()
         }
         requestFocus(context)
         Log.d(TAG, "Mic acquired by ${owner.name}")
@@ -92,6 +102,7 @@ object AudioManagerController {
         synchronized(this) {
             if (_micOwner.value != owner) return
             _micOwner.value = MicOwner.NONE
+            micSince = 0L
         }
         abandonFocus()
         Log.d(TAG, "Mic released by ${owner.name}")
@@ -103,8 +114,11 @@ object AudioManagerController {
     /** True when the mic is free for [owner] to start recording. */
     fun canStartRecording(context: Context, owner: MicOwner): Boolean {
         val current = _micOwner.value
-        if (current == MicOwner.NONE) return acquireMic(context, owner)
-        return current == owner
+        if (current == owner) return true
+        // Delegates to acquireMic so the STT -> voice-call preemption rule
+        // applies here too (was: GEMINI_LIVE/CALL_CAPTURE silently denied
+        // while the wake-word loop held the mic -> call duplex never heard).
+        return acquireMic(context, owner)
     }
 
     /** Force-release whatever holds the mic (call/STT handover, crash recovery). */
@@ -112,6 +126,7 @@ object AudioManagerController {
         val previous = synchronized(this) {
             val p = _micOwner.value
             _micOwner.value = MicOwner.NONE
+            micSince = 0L
             p
         }
         if (previous != MicOwner.NONE) {

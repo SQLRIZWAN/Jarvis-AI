@@ -23,6 +23,7 @@ import com.sqlai.assistant.core.AudioManagerController
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.core.StateBus
+import com.sqlai.assistant.ai.GeminiLiveAudioEngine
 import com.sqlai.assistant.engine.AssistantEngine
 import com.sqlai.assistant.engine.OverlayManager
 import com.sqlai.assistant.engine.Speaker
@@ -103,6 +104,8 @@ class ListeningService : Service() {
     @Volatile private var awaitingAttempts = 0
     @Volatile private var cachedWakeWord = "sql"
     @Volatile private var cachedLanguageTag = "en-IN"
+    @Volatile private var wasSpeaking = false
+    @Volatile private var permissionWarnedAt = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -245,6 +248,10 @@ class ListeningService : Service() {
             StateBus.setState(AssistantState.LISTENING)
             mainHandler.removeCallbacks(watchdog)
             mainHandler.postDelayed(watchdog, 400)
+            // BUG #1 fast path: 300ms cadence re-arms the mic the instant
+            // TTS finishes + heals stuck mic ownership (never dies).
+            mainHandler.removeCallbacks(fastRearm)
+            mainHandler.post(fastRearm)
         } else {
             LogBus.log("No speech recognition engine on this device", LogLevel.ERROR)
             StateBus.setState(AssistantState.ERROR)
@@ -263,13 +270,29 @@ class ListeningService : Service() {
     private fun observeSettings() {
         if (settingsJob != null) return
         // Mic preemption: when the call/live engine takes the mic, stop our
-        // recognizer session immediately (prevents dual-recording).
+        // recognizer session immediately (prevents dual-recording). Also
+        // heals a live-engine mic leaked OUTSIDE a call (auto-heal).
         scope.launch {
             AudioManagerController.micOwner.collect { owner ->
                 if (owner != AudioManagerController.MicOwner.NONE &&
                     owner != AudioManagerController.MicOwner.STT && isListening
                 ) {
                     cancelRecognition()
+                }
+                val inCall = CallStateMachine.isCallActive() ||
+                    AudioManagerController.isCallMode()
+                if (owner == AudioManagerController.MicOwner.GEMINI_LIVE && !inCall) {
+                    LogBus.log("[MIC] live mic leaked outside call - releasing", LogLevel.WARN)
+                    GeminiLiveAudioEngine.stopMic()
+                }
+                // SPEC: exactly 300ms after ANY mic release the STT loop
+                // re-arms (covers TTS/call/one-shot capture endings).
+                if (owner == AudioManagerController.MicOwner.NONE &&
+                    !isListening && running && !speechPauseActive()
+                ) {
+                    mainHandler.postDelayed({
+                        if (running && !isListening && micAvailable()) startRecognition()
+                    }, 300)
                 }
             }
         }
@@ -348,6 +371,64 @@ class ListeningService : Service() {
             }
             mainHandler.postDelayed(this, 2500)
         }
+    }
+
+    /**
+     * BUG #1 - runs every 300 ms:
+     *  1. Re-arms the mic exactly 300 ms after TTS/Gemini speech ends
+     *     (spec: "har speak ke end pe 300ms baad mic re-arm").
+     *  2. Auto-recovers a mic stuck >2 s with no legitimate owner
+     *     (spec: "mic 2s se zyada busy -> on-screen mic-stuck log + recovery").
+     */
+    private val fastRearm = object : Runnable {
+        override fun run() {
+            if (!running) return
+            val speaking = Speaker.isSpeaking()
+            val justEnded = wasSpeaking && !speaking
+            wasSpeaking = speaking
+            if (justEnded && !isListening && !speechPauseActive() && micAvailable()) {
+                LogBus.log("[MIC] speech ended - re-arming mic in 300ms", LogLevel.INFO)
+                mainHandler.postDelayed({
+                    if (running && !isListening && micAvailable()) startRecognition()
+                }, 300)
+            }
+            maybeRecoverStuckMic()
+            mainHandler.postDelayed(this, 300)
+        }
+    }
+
+    /** True while a legit voice-call session owns mic/audio resources. */
+    private fun callSessionActive(): Boolean =
+        CallStateMachine.isCallActive() || AudioManagerController.isCallMode()
+
+    private fun maybeRecoverStuckMic() {
+        val owner = AudioManagerController.micOwner.value
+        if (owner == AudioManagerController.MicOwner.NONE) return
+        if (owner == AudioManagerController.MicOwner.CALL_CAPTURE) {
+            // One-shot capture has its own 12s timeout - only force past it.
+            if (AudioManagerController.micHeldMs() <= 15_000) return
+        } else if (callSessionActive()) {
+            return // duplex during a call may legitimately hold the mic
+        } else if (owner == AudioManagerController.MicOwner.GEMINI_LIVE &&
+            GeminiLiveAudioEngine.isMicStreaming()
+        ) {
+            return // live streaming session in progress
+        } else if (owner == AudioManagerController.MicOwner.STT && isListening) {
+            return // our own active recognition session
+        }
+        val held = AudioManagerController.micHeldMs()
+        if (held in 1..2_000) return
+        // ---- STUCK: >2s busy with no legitimate holder -> on-screen log + heal
+        LogBus.log(
+            "[MIC] STUCK: ${owner.name} held ${held}ms outside call - force recovering",
+            LogLevel.ERROR
+        )
+        if (owner == AudioManagerController.MicOwner.GEMINI_LIVE) {
+            GeminiLiveAudioEngine.stopMic()
+        }
+        AudioManagerController.forceRelease()
+        cancelRecognition()
+        mainHandler.postDelayed({ if (running && !isListening) startRecognition() }, 200)
     }
 
     /** True while the assistant itself is speaking (avoid self-hearing), capped. */
@@ -472,9 +553,20 @@ class ListeningService : Service() {
                     consecutiveErrors = 0 // Normal in always-on mode.
 
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> {
-                    LogBus.log("Microphone permission missing", LogLevel.ERROR)
+                    // BUG #1: never kill the listen loop - keep retrying so
+                    // granting the permission later resumes instantly.
+                    val now = System.currentTimeMillis()
+                    if (now - permissionWarnedAt > 30_000) {
+                        permissionWarnedAt = now
+                        LogBus.log(
+                            "Microphone permission missing - grant it; retrying every 30s",
+                            LogLevel.ERROR
+                        )
+                    }
                     StateBus.setState(AssistantState.ERROR)
-                    running = false
+                    scheduleNext(30_000)
+                    consecutiveErrors = 0
+                    return
                 }
 
                 else -> {

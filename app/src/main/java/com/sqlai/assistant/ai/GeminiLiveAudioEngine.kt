@@ -186,6 +186,9 @@ object GeminiLiveAudioEngine {
         if (_state.value == LiveState.LISTENING) _state.value = LiveState.IDLE
     }
 
+    /** True while the live mic loop is actually streaming (duplex health). */
+    fun isMicStreaming(): Boolean = micRunning.get()
+
     /**
      * Route audio through the voice-call path (phone earpiece / call Bluetooth
      * headset) and start mic streaming - used by the live call assistant.
