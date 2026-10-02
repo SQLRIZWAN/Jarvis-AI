@@ -54,7 +54,7 @@ import java.io.ByteArrayOutputStream
 object SQLAgentCoreV5 {
 
     private const val STEP_TIMEOUT_MS = 15_000L // BUG #3: 15s per-step watchdog
-    private const val LONG_STEP_TIMEOUT_MS = 90_000L // wa_call / wait_for workflows
+    private const val LONG_STEP_TIMEOUT_MS = 180_000L // wa_call / wait_for workflows
     private val LONG_ACTIONS = setOf("wa_call", "call", "wait_for")
     private const val NO_PROGRESS_LIMIT = 20
     private const val AI_ERROR_LIMIT = 3

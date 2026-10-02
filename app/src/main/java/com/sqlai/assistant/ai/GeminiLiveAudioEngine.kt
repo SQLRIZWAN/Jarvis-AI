@@ -622,6 +622,7 @@ object GeminiLiveAudioEngine {
         try {
             record.startRecording()
             val chunk = ByteArray(INPUT_RATE / 10 * 2) // 100 ms of PCM16 mono
+            val startedAt = System.currentTimeMillis()
             while (micRunning.get() && micGeneration.get() == generation) {
                 var read = 0
                 while (read < chunk.size &&
@@ -634,15 +635,20 @@ object GeminiLiveAudioEngine {
                 }
                 if (micGeneration.get() != generation) break
                 if (read > 0) {
-                    lastStreamAt = System.currentTimeMillis()
                     val ws = webSocket
                     if (ws != null && connected) {
                         ws.sendBytes(audioMessage(chunk.copyOf(read)))
+                        // G2 F5: ONLY mark streaming when audio actually went
+                        // out - the old code stamped this on every read, so the
+                        // idle-release below NEVER fired and the mic stayed
+                        // locked to GEMINI_LIVE for the whole session (STT
+                        // could never re-arm -> assistant heard nothing).
+                        lastStreamAt = System.currentTimeMillis()
                     }
                 }
                 // Socket gone for >10 s? Release the mic instead of idling.
                 if ((!connected || webSocket == null) &&
-                    System.currentTimeMillis() - lastStreamAt > 10_000
+                    System.currentTimeMillis() - maxOf(lastStreamAt, startedAt) > 10_000
                 ) {
                     LogBus.log("Live socket idle - releasing mic", LogLevel.WARN)
                     break

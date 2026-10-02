@@ -70,7 +70,13 @@ object Speaker {
      *  - [postPriority] clears the backlog for final/important lines,
      *  - while a backlog exists the Android TTS path speeds up ("fast mode").
      */
-    private class Pending(val text: String, val ts: Long, val epoch: Int)
+    private class Pending(
+        val text: String,
+        val ts: Long,
+        val epoch: Int,
+        /** G2: set for awaitCallSpeech/awaitSpeech - completed by the consumer. */
+        val result: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+    )
 
     private val speechScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val queueLock = Any()
@@ -78,6 +84,16 @@ object Speaker {
     private val signal = Channel<Unit>(Channel.CONFLATED)
     @Volatile private var queueEpoch = 0
     @Volatile private var consumerStarted = false
+    /**
+     * G2: while false the consumer PAUSES (used around Gemini speakText so
+     * TTS and the Gemini track never overlap on the call).
+     */
+    @Volatile private var queueGateOpen = true
+
+    fun setQueueGate(open: Boolean) {
+        queueGateOpen = open
+        if (open) signal.trySend(Unit)
+    }
 
     /**
      * NON-BLOCKING speak: enqueue and return immediately. Used by the agent
@@ -95,24 +111,41 @@ object Speaker {
     fun postPriority(text: String) {
         if (text.isBlank()) return
         synchronized(queueLock) {
-            val dropped = pendingLines.size
+            val dropped = pendingLines.toList()
             pendingLines.clear()
-            if (dropped > 0) LogBus.log("[Speaker] priority: dropped $dropped pending line(s)", LogLevel.INFO)
+            dropped.forEach { it.result?.complete(false) }
+            if (dropped.isNotEmpty()) LogBus.log("[Speaker] priority: dropped ${dropped.size} pending line(s)", LogLevel.INFO)
         }
         enqueue(text)
     }
 
-    private fun enqueue(text: String) {
-        if (text.isBlank()) return
+    private fun enqueue(text: String, result: kotlinx.coroutines.CompletableDeferred<Boolean>? = null) {
+        if (text.isBlank()) {
+            result?.complete(false)
+            return
+        }
         synchronized(queueLock) {
-            while (pendingLines.size >= 2) {
-                pendingLines.removeFirst()
+            while (result == null && pendingLines.size >= 2) {
+                val dropped = pendingLines.removeFirst()
+                dropped.result?.complete(false)
                 LogBus.log("[Speaker] backlog>2 - dropped stale progress line", LogLevel.INFO)
             }
-            pendingLines.addLast(Pending(text, System.currentTimeMillis(), queueEpoch))
+            pendingLines.addLast(Pending(text, System.currentTimeMillis(), queueEpoch, result))
         }
         signal.trySend(Unit)
         startQueueConsumer()
+    }
+
+    /**
+     * G2 - speak [text] on the active call and suspend until playback ends.
+     * Runs through the single queue consumer, so it is SERIALIZED with every
+     * other speech line (no TTS/Gemini collisions during delivery).
+     */
+    suspend fun awaitCallSpeech(text: String, timeoutMs: Long = 30_000): Boolean {
+        if (text.isBlank()) return false
+        val deferred = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        enqueue(text, deferred)
+        return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) { deferred.await() } ?: false
     }
 
     /** Lines waiting to be spoken (0 = perfectly in sync). */
@@ -121,7 +154,12 @@ object Speaker {
     /** Drop everything still queued (call ended / task reset). */
     fun flushQueued() {
         queueEpoch++
-        synchronized(queueLock) { pendingLines.clear() }
+        val dropped = synchronized(queueLock) {
+            val l = pendingLines.toList()
+            pendingLines.clear()
+            l
+        }
+        dropped.forEach { it.result?.complete(false) }
     }
 
     /** True while something is being spoken (TTS or Gemini Live). */
@@ -154,28 +192,39 @@ object Speaker {
                         val item = synchronized(queueLock) {
                             pendingLines.removeFirstOrNull()
                         } ?: break
-                        if (item.epoch != queueEpoch) continue // flushed
+                        if (item.epoch != queueEpoch) {
+                            item.result?.complete(false)
+                            continue // flushed
+                        }
+                        // G2: paused while a Gemini delivery owns the output.
+                        while (!queueGateOpen) delay(100)
+                        val onCall =
+                            com.sqlai.assistant.service.CallStateMachine.isCallActive()
                         // BUG #3: a line older than 1.5s is stale progress -
-                        // drop it, only the freshest line matters.
+                        // drop it (skipped on a call - statuses still matter).
                         val age = System.currentTimeMillis() - item.ts
-                        if (age > 1_500) {
+                        if (item.result == null && age > 1_500 && !onCall) {
                             LogBus.log(
                                 "[Speaker] dropped STALE line (${age}ms): \"${item.text.take(40)}\"",
                                 LogLevel.INFO
                             )
                             continue
                         }
-                        // FEATURE #3: while a call session owns the audio,
-                        // nothing plays on the normal speaker.
-                        if (com.sqlai.assistant.service.CallStateMachine.isCallActive()) {
-                            LogBus.log("[Speaker] dropped during call: \"${item.text.take(40)}\"", LogLevel.INFO)
-                            continue
-                        }
+                        var ok = false
                         try {
-                            speak(item.text)
-                        } catch (e: Exception) {
-                            Log.w(TAG, "queued speak failed", e)
+                            if (onCall) {
+                                // G2 F7: during a call every line is routed onto
+                                // the call stream instead of being DROPPED.
+                                val st = SqlAiApp.settings.settings.first()
+                                ok = speakOnCall(item.text, st)
+                            } else {
+                                speak(item.text)
+                                ok = true
+                            }
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "queued speak failed", t)
                         }
+                        item.result?.complete(ok)
                     }
                 }
             }
@@ -290,11 +339,18 @@ object Speaker {
 
     // ------------------------------------------------------------- call mode
 
-    /** Route TTS output through the phone call audio stream (caller hears it). */
-    fun enterCallMode(context: Context, settings: AppSettings) {
+    /**
+     * Route TTS output through the phone call audio stream (caller hears it).
+     * G2 F3: WAITS for the async TTS engine (was: silent no-op when the
+     * engine had not finished init -> every later speakOnCall failed).
+     */
+    suspend fun enterCallMode(context: Context, settings: AppSettings) {
         init(context)
         callMode = true
-        val engine = tts ?: return
+        val engine = awaitReady(4000) ?: run {
+            LogBus.log("[Speaker] enterCallMode: TTS not ready in 4s", LogLevel.WARN)
+            return
+        }
         try {
             engine.setAudioAttributes(
                 AudioAttributes.Builder()
@@ -328,9 +384,21 @@ object Speaker {
      * (so the call assistant can listen right after).
      */
     suspend fun speakOnCall(text: String, settings: AppSettings, timeoutMs: Long = 15000): Boolean {
-        val engine = tts
-        if (!ready || engine == null || text.isBlank()) return false
+        if (text.isBlank()) return false
+        // G2 F3: wait up to 4s for the engine instead of failing instantly.
+        val engine = awaitReady(4000) ?: run {
+            LogBus.log("[Speaker] speakOnCall: TTS unavailable", LogLevel.WARN)
+            return false
+        }
         return try {
+            if (callMode) {
+                engine.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+            }
             applyVoiceSettings(engine, settings)
             engine.setSpeechRate(settings.ttsSpeed)
             val id = "call-${nextId()}"

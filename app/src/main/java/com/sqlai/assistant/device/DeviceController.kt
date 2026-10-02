@@ -206,7 +206,14 @@ object DeviceController {
                         } catch (e: Exception) {
                             com.sqlai.assistant.core.AppSettings()
                         }
-                        GeminiLiveAudioEngine.speakText(liveSettings, spoken)
+                        // G2: gate the speech queue so TTS cannot overlap
+                        // the Gemini call-stream playback.
+                        Speaker.setQueueGate(false)
+                        try {
+                            GeminiLiveAudioEngine.speakText(liveSettings, spoken)
+                        } finally {
+                            Speaker.setQueueGate(true)
+                        }
                     } else {
                         // Fire-and-forget: never blocks the Loop B executor.
                         Speaker.post(spoken)
