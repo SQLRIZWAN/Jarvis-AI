@@ -36,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sqlai.assistant.core.PermissionHelper
+import com.sqlai.assistant.core.PermissionManager
 import com.sqlai.assistant.core.PermissionStatus
 import com.sqlai.assistant.ui.theme.SqlSuccess
 import com.sqlai.assistant.ui.theme.SqlWarn
@@ -53,7 +54,7 @@ fun PermissionsScreen() {
         }
     }
 
-    val statuses = remember(tick) { PermissionHelper.statuses(context) }
+    val statuses = remember(tick) { PermissionHelper.statuses(context).filter { it.needed } }
     val grantedCount = statuses.count { it.granted }
 
     val runtimeLauncher = rememberLauncherForActivityResult(
@@ -124,13 +125,29 @@ fun PermissionsScreen() {
                                 )
                             )
                         } else if (item.id == "storage") {
-                            runtimeLauncher.launch(
-                                arrayOf(
-                                    android.Manifest.permission.READ_MEDIA_IMAGES,
-                                    android.Manifest.permission.READ_MEDIA_AUDIO,
-                                    android.Manifest.permission.READ_MEDIA_VIDEO
-                                )
-                            )
+                            // Android 11+ -> All Files Access settings screen;
+                            // Android 10- -> legacy READ/WRITE runtime request.
+                            when (val action = PermissionManager.storageAction(context)) {
+                                is PermissionManager.StorageAction.OpenSettings -> {
+                                    try {
+                                        context.startActivity(
+                                            action.intent.addFlags(
+                                                android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                            )
+                                        )
+                                    } catch (e: Exception) {
+                                        PermissionHelper.open(context, "storage")
+                                    }
+                                    tick++
+                                }
+
+                                is PermissionManager.StorageAction.RequestPermissions ->
+                                    runtimeLauncher.launch(action.permissions)
+
+                                PermissionManager.StorageAction.Granted -> tick++
+                            }
+                        } else if (item.id == "media") {
+                            runtimeLauncher.launch(PermissionManager.mediaPermissions())
                         } else {
                             PermissionHelper.open(context, item.id)
                             tick++

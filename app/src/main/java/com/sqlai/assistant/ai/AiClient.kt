@@ -3,6 +3,7 @@ package com.sqlai.assistant.ai
 import android.util.Base64
 import com.sqlai.assistant.core.AiProvider
 import com.sqlai.assistant.core.AppSettings
+import com.sqlai.assistant.core.CorePromptBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -87,8 +88,16 @@ object AiClient {
         screenContext: String?,
         systemPromptOverride: String?
     ): String {
-        val sb = StringBuilder(systemPromptOverride ?: settings.systemPrompt)
-        sb.append("\n\n").append(settings.languageInstruction())
+        // Immutable core prompt + user context (systemPromptOverride wins for callers
+        // that bring their own contract, e.g. the agent loop or auto-reply).
+        val sb = StringBuilder(
+            systemPromptOverride
+                ?: CorePromptBuilder.action(settings)
+        )
+        if (systemPromptOverride != null) {
+            sb.append("\n\n").append(settings.languageInstruction())
+            sb.append(com.sqlai.assistant.core.CorePromptBuilder.userContext(settings))
+        }
         if (!screenContext.isNullOrBlank()) {
             sb.append("\n\nCURRENT SCREEN CONTEXT (live):\n").append(screenContext)
         }

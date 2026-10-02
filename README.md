@@ -18,6 +18,31 @@ taps, swipes and typing for you.
 
 ---
 
+## What's new in v1.2
+
+- **Gemini Live Audio (native voice)** - `GeminiLiveAudioEngine.kt` streams the
+  assistant's replies through Gemini's Live API (bidi WebSocket + protobuf):
+  human-like male/female voices, routed to the phone speaker or Bluetooth
+  headset, with automatic fallback to Android TTS. Full-duplex mic streaming
+  runs live on phone and WhatsApp calls.
+- **Unlimited agentic loop** - `AgenticLoopEngine.kt` has NO step budget: it
+  keeps Observe -> Think -> Act -> Verify running until the task is 100%
+  verified, with silent/throttled background execution (no notification spam).
+- **WhatsApp calls & dynamic replies** - `WhatsAppCallAndMessageService.kt`
+  auto-taps Answer on WhatsApp/Telegram audio+video calls and routes every
+  incoming message to a dynamically generated Gemini reply (template only as
+  offline fallback).
+- **Protected system prompt** - `CorePromptBuilder.kt` keeps the core rules,
+  JSON schema and tool definitions immutable in app code; the Prompt tab only
+  exposes your personal context (name / preferences / style), appended at runtime.
+- **Version-correct storage permissions** - `PermissionManager.kt` opens
+  All Files Access with the package URI on Android 11+, requests legacy
+  READ/WRITE on Android 10, and READ_MEDIA_* on Android 13+ (works up to Android 17).
+- **Unkillable service** - restarts itself after task removal; START_STICKY
+  foreground microphone service.
+- **Modern UI** - Material 3 status badges, protected-prompt cards, voice
+  engine picker (Gemini Live voices: Puck, Kore, Charon...).
+
 ## Features
 
 - **Autonomous Agentic Loop (v1.1)** - `SQLAgentEngine` runs a

@@ -70,18 +70,9 @@ object PermissionHelper {
      *  - Android 10-12: READ_EXTERNAL_STORAGE (scoped fallback)
      *  - Optional full file access via MANAGE_EXTERNAL_STORAGE
      */
-    fun hasStorage(context: Context): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            has(context, Manifest.permission.READ_MEDIA_IMAGES) ||
-                has(context, Manifest.permission.READ_MEDIA_AUDIO) ||
-                has(context, Manifest.permission.READ_MEDIA_VIDEO)
-        } else {
-            has(context, Manifest.permission.READ_EXTERNAL_STORAGE) ||
-                Environment.isExternalStorageManager()
-        }
-    }
+    fun hasStorage(context: Context): Boolean = PermissionManager.hasStorage(context)
 
-    fun hasManageAllFiles(): Boolean = Environment.isExternalStorageManager()
+    fun hasManageAllFiles(): Boolean = PermissionManager.hasAllFilesAccess()
 
     // ------------------------------------------------------------- phone
 
@@ -149,13 +140,22 @@ object PermissionHelper {
         ),
         PermissionStatus(
             id = "storage",
-            title = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-                "Photos, Video & Audio (Android 13+)"
-            else "Storage (All files access)",
-            description = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-                "READ_MEDIA_IMAGES / AUDIO / VIDEO access"
-            else "Legacy storage + optional All Files permission",
-            granted = hasStorage(context)
+            title = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+                "Storage (All files access)"
+            else "Storage (legacy read/write)",
+            description = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+                "Opens the system All Files Access screen for this app"
+            else "READ/WRITE_EXTERNAL_STORAGE (Android 10 and below)",
+            granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+                PermissionManager.hasAllFilesAccess()
+            else hasStorage(context)
+        ),
+        PermissionStatus(
+            id = "media",
+            title = "Photos, Video & Audio (Android 13+)",
+            description = "READ_MEDIA_IMAGES / VIDEO / AUDIO granular access",
+            granted = PermissionManager.hasMediaAccess(context),
+            needed = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
         ),
         PermissionStatus(
             id = "assistant",
@@ -205,7 +205,8 @@ object PermissionHelper {
     /** Launch the correct system screen for a permission card id. */
     fun open(context: Context, id: String) {
         val intent: Intent? = when (id) {
-            "mic", "notifications_perm", "contacts", "storage" -> storageOrRuntimeIntent(context, id)
+            "storage" -> PermissionManager.allFilesAccessIntent(context)
+            "mic", "notifications_perm", "contacts" -> null
             "phone" -> null // runtime
             "accessibility" -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
             "overlay" -> Intent(
@@ -232,17 +233,6 @@ object PermissionHelper {
                 Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         }
-    }
-
-    private fun storageOrRuntimeIntent(context: Context, id: String): Intent? {
-        if (id != "storage") return null
-        // Android 11+ fallback page for "All files access" when media perms are not enough.
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasManageAllFiles()) {
-            Intent(
-                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                Uri.parse("package:${context.packageName}")
-            )
-        } else null
     }
 
     fun requestRuntime(activity: Activity) {

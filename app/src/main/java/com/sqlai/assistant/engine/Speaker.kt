@@ -7,10 +7,12 @@ import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import android.util.Log
 import com.sqlai.assistant.SqlAiApp
+import com.sqlai.assistant.ai.GeminiLiveAudioEngine
 import com.sqlai.assistant.core.AppSettings
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.core.VoiceGender
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -74,11 +76,26 @@ object Speaker {
     }
 
     suspend fun speak(text: String) {
+        if (text.isBlank()) return
         val settings = SqlAiApp.settings.settings.first()
-        if (!settings.ttsEnabled || text.isBlank()) return
-        val engine = tts
-        if (!ready || engine == null) {
-            LogBus.log("TTS said: $text")
+        if (!settings.ttsEnabled) return
+
+        // ---- preferred: Gemini native audio (Live API) --------------------
+        if (GeminiLiveAudioEngine.isUsable(settings)) {
+            if (GeminiLiveAudioEngine.speakText(settings, text)) return
+            LogBus.log("Gemini Live unavailable - using Android TTS fallback", LogLevel.WARN)
+        }
+
+        // ---- fallback: Android TTS ----------------------------------------
+        if (tts == null) {
+            try {
+                init(SqlAiApp.instance)
+            } catch (e: Exception) {
+                LogBus.log("TTS init error: ${e.message}", LogLevel.WARN)
+            }
+        }
+        val engine = awaitReady(2500) ?: run {
+            LogBus.log("TTS not ready - said: $text")
             return
         }
         try {
@@ -88,6 +105,17 @@ object Speaker {
         } catch (e: Exception) {
             LogBus.log("TTS error: ${e.message}", LogLevel.WARN)
         }
+    }
+
+    /** Waits (briefly) for the async TTS engine to finish initializing. */
+    private suspend fun awaitReady(timeoutMs: Long): TextToSpeech? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val engine = tts
+            if (ready && engine != null) return engine
+            delay(80)
+        }
+        return if (ready) tts else null
     }
 
     // ------------------------------------------------------------- call mode

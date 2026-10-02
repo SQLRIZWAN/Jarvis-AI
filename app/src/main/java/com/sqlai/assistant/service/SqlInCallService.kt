@@ -6,6 +6,7 @@ import android.telecom.VideoProfile
 import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.ai.AiClient
 import com.sqlai.assistant.ai.ChatMessage
+import com.sqlai.assistant.ai.GeminiLiveAudioEngine
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.core.StateBus
@@ -143,14 +144,30 @@ class SqlInCallService : InCallService() {
         sessionJob?.cancel()
         sessionJob = scope.launch {
             val settings = SqlAiApp.settings.settings.first()
-            Speaker.init(this@SqlInCallService)
-            Speaker.enterCallMode(this@SqlInCallService, settings)
 
             val greeting = if (settings.language.code == "en") {
                 "Hello, this is SQL AI speaking on behalf of the user. How can I help?"
             } else {
-                "Namaste, main SQL AI bol rahi hoon. Bataiye, main kya madad kar sakti hoon?"
+                "Namaste, this is SQL AI speaking for the user. Boliye, main sun rahi hoon."
             }
+
+            // ---- preferred: Gemini Live duplex audio over the call --------
+            if (GeminiLiveAudioEngine.isUsable(settings)) {
+                GeminiLiveAudioEngine.enterCallMode(this@SqlInCallService)
+                GeminiLiveAudioEngine.speakText(settings, greeting)
+                GeminiLiveAudioEngine.startMic()
+                LogBus.log("Gemini Live duplex voice active on call", LogLevel.SUCCESS)
+                while (isActive && call.state == Call.STATE_ACTIVE) {
+                    delay(1000)
+                }
+                GeminiLiveAudioEngine.exitCallMode(this@SqlInCallService)
+                LogBus.log("Call ended - Gemini session closed", LogLevel.INFO)
+                return@launch
+            }
+
+            // ---- fallback: TTS + SpeechRecognizer turn loop ---------------
+            Speaker.init(this@SqlInCallService)
+            Speaker.enterCallMode(this@SqlInCallService, settings)
 
             var turns = 0
             var silentTurns = 0
@@ -214,5 +231,10 @@ class SqlInCallService : InCallService() {
         sessionJob?.cancel()
         sessionJob = null
         Speaker.exitCallMode()
+        try {
+            GeminiLiveAudioEngine.exitCallMode(this)
+        } catch (e: Exception) {
+            // Ignore.
+        }
     }
 }

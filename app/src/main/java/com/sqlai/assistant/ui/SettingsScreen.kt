@@ -188,6 +188,42 @@ fun SettingsScreen() {
             }
 
             Spacer(Modifier.height(10.dp))
+
+            ToggleRow(
+                title = "Gemini Live voice (native audio)",
+                subtitle = "Natural human voice streamed from Gemini instead of Android TTS",
+                checked = settings?.geminiLiveVoice == true,
+                onCheckedChange = { v ->
+                    scope.launch { SqlAiApp.settings.setGeminiLiveVoice(v) }
+                }
+            )
+            if (settings?.geminiLiveVoice == true) {
+                if (settings?.provider == com.sqlai.assistant.core.AiProvider.GEMINI &&
+                    settings?.apiKey?.isNotBlank() == true
+                ) {
+                    Text(
+                        "Live voice model: ${settings?.liveModel}",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                } else {
+                    Text(
+                        "Live voice needs the Google Gemini provider + API key. " +
+                            "Falls back to Android TTS otherwise.",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                }
+                LiveVoicePicker(
+                    selected = settings?.liveVoiceName.orEmpty(),
+                    gender = settings?.voiceGender ?: com.sqlai.assistant.core.VoiceGender.MALE,
+                    onSelect = { voice ->
+                        scope.launch { SqlAiApp.settings.setLiveVoiceName(voice) }
+                    }
+                )
+            }
+
+            Spacer(Modifier.height(6.dp))
             Text(
                 "Pitch: ${"%.2f".format(settings?.pitch ?: 1f)}",
                 fontSize = 12.sp
@@ -219,18 +255,9 @@ fun SettingsScreen() {
                     scope.launch { SqlAiApp.settings.setScreenVisionEnabled(v) }
                 }
             )
-            val steps = settings?.agentMaxSteps ?: 8
-            Text("Max agent steps per task: $steps", fontSize = 12.sp)
-            Slider(
-                value = steps.toFloat(),
-                onValueChange = { v ->
-                    scope.launch { SqlAiApp.settings.setAgentMaxSteps(v.toInt()) }
-                },
-                valueRange = 1f..20f,
-                steps = 18
-            )
             Text(
-                "Think -> Act -> Verify loop retries until the task is verified complete.",
+                "Unlimited steps - the Think -> Act -> Verify loop keeps running " +
+                    "until the task is 100% verified complete.",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.outline
             )
@@ -433,6 +460,54 @@ private fun SettingsLinkRow(title: String, onClick: () -> Unit) {
         Text(title, fontSize = 13.5.sp)
         Button(onClick = onClick) {
             Text("Open", fontSize = 12.sp)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LiveVoicePicker(
+    selected: String,
+    gender: com.sqlai.assistant.core.VoiceGender,
+    onSelect: (String) -> Unit
+) {
+    var open by remember { mutableStateOf(false) }
+    val auto = if (gender == com.sqlai.assistant.core.VoiceGender.FEMALE) {
+        "Kore (female, auto)"
+    } else {
+        "Puck (male, auto)"
+    }
+    Spacer(Modifier.height(8.dp))
+    ExposedDropdownMenuBox(expanded = open, onExpandedChange = { open = it }) {
+        OutlinedTextField(
+            value = selected.ifBlank { auto },
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("Gemini Live voice") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = open) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor()
+        )
+        ExposedDropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            listOf(
+                "" to auto,
+                "Puck" to "Puck (male, upbeat)",
+                "Charon" to "Charon (male, low)",
+                "Fenrir" to "Fenrir (male, firm)",
+                "Kore" to "Kore (female)",
+                "Aoede" to "Aoede (female, breezy)",
+                "Leda" to "Leda (female, youth)",
+                "Orus" to "Orus (male, firm)"
+            ).forEach { (id, label) ->
+                DropdownMenuItem(
+                    text = { Text(label, fontSize = 14.sp) },
+                    onClick = {
+                        open = false
+                        onSelect(id)
+                    }
+                )
+            }
         }
     }
 }

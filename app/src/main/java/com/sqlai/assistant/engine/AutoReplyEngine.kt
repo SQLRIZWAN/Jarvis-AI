@@ -94,7 +94,7 @@ object AutoReplyEngine {
                     )
                 ),
                 imageJpeg = null,
-                systemPromptOverride = "You write natural WhatsApp auto-replies. Output ONLY the reply text."
+                systemPromptOverride = com.sqlai.assistant.core.CorePromptBuilder.reply(settings)
             ).take(200).replace("\"", "").trim()
         } catch (e: Exception) {
             LogBus.log("AI reply failed, using template: ${e.message}", LogLevel.WARN)

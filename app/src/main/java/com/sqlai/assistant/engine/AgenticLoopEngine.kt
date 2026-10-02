@@ -6,7 +6,7 @@ import com.sqlai.assistant.ai.Action
 import com.sqlai.assistant.ai.AgentParser
 import com.sqlai.assistant.ai.AiClient
 import com.sqlai.assistant.ai.ChatMessage
-import com.sqlai.assistant.core.AppSettings
+import com.sqlai.assistant.core.CorePromptBuilder
 import com.sqlai.assistant.core.AssistantState
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
@@ -20,20 +20,28 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 
 /**
- * Autonomous ReAct agent:
+ * Unkillable, UNLIMITED Observe -> Think -> Act -> Verify agent.
  *
- *   THINK  -> LLM analyses the live screen + task
- *   ACT    -> executes 1-3 concrete device actions
- *   VERIFY -> re-reads the screen against the model's `expect`
- *   LOOP   -> on failure, feeds the fresh screen back and re-plans
+ * There is NO hardcoded step budget: the loop keeps running until the model
+ * reports `done=true` and the result verifies on the live screen. The only
+ * abort paths are hard failures (AI unreachable, accessibility lost, or a
+ * long no-progress streak where verification keeps failing) - never a fixed
+ * action counter.
  *
- * Runs multi-step flows (e.g. "open Instagram, like my latest reel") until the
- * model marks the task `done` or [AppSettings.agentMaxSteps] is exhausted.
+ * Background execution is deliberately SILENT: status voice lines are spoken
+ * only for the first update and the final outcome, and the overlay command
+ * text is throttled so continuous action execution never spams notifications.
  */
-object SQLAgentEngine {
+object AgenticLoopEngine {
 
-    private const val MAX_TURNS = 16
     private const val MAX_THOUGHT_LOG = 180
+    private const val NO_PROGRESS_LIMIT = 20
+    private const val AI_ERROR_LIMIT = 3
+    private const val STATE_REFRESH_MS = 6_000L
+    private const val MAX_TURNS = 20
+
+    private var lastStateRefresh = 0L
+    private var spokenReplies = 0
 
     suspend fun runTask(task: String, source: String) {
         val settings = SqlAiApp.settings.settings.first()
@@ -45,18 +53,24 @@ object SQLAgentEngine {
             return
         }
 
-        LogBus.log("[$source] Agent started: \"$task\"", LogLevel.SUCCESS)
+        spokenReplies = 0
+        lastStateRefresh = 0L
+        LogBus.log("[$source] Agent started (unlimited loop): \"$task\"", LogLevel.SUCCESS)
         val conversation = ArrayList<ChatMessage>()
         conversation.add(ChatMessage("user", "TASK: $task"))
 
         var lastReply = ""
         var previousVerifyOk = true
         var completed = false
+        var step = 0
+        var noProgressStreak = 0
+        var aiErrors = 0
 
-        for (step in 1..settings.agentMaxSteps) {
-            StateBus.setState(AssistantState.PROCESSING)
-            StateBus.setCommand("step $step/${settings.agentMaxSteps}: $task")
-            LogBus.log("Agent step $step/${settings.agentMaxSteps} - thinking...")
+        refreshState(task, force = true)
+
+        // ---------------------------------------------------------- main loop
+        while (!completed) {
+            step++
 
             // ---- OBSERVE --------------------------------------------------
             val screen = withContext(Dispatchers.IO) {
@@ -75,30 +89,39 @@ object SQLAgentEngine {
 
             // ---- THINK ----------------------------------------------------
             val raw = try {
+                aiErrors = 0
                 AiClient.complete(
                     settings = settings,
                     screenContext = null,
                     history = conversation,
                     imageJpeg = image,
-                    systemPromptOverride = AppSettings.AGENT_SYSTEM_PROMPT
+                    systemPromptOverride = CorePromptBuilder.agent(settings)
                 )
             } catch (e: Exception) {
-                LogBus.log("Agent AI error: ${e.message}", LogLevel.ERROR)
-                Speaker.speak("Sorry, the AI service failed.")
-                return
+                aiErrors++
+                LogBus.log("Agent AI error ($aiErrors/$AI_ERROR_LIMIT): ${e.message}", LogLevel.ERROR)
+                if (aiErrors >= AI_ERROR_LIMIT) {
+                    Speaker.speak("Sorry, the AI service is unavailable.")
+                    break
+                }
+                withContext(Dispatchers.IO) { kotlinx.coroutines.delay(1200) }
+                continue
             }
             conversation.add(ChatMessage("assistant", raw.take(2000)))
 
             val plan = AgentParser.parse(raw)
-            LogBus.log("Think: ${plan.thought.take(MAX_THOUGHT_LOG)}")
+            LogBus.log("Think #$step: ${plan.thought.take(MAX_THOUGHT_LOG)}")
             if (plan.reply.isNotBlank() && !plan.reply.equals(lastReply, ignoreCase = true)) {
                 lastReply = plan.reply
-                Speaker.speak(plan.reply)
+                if (spokenReplies == 0 || plan.done) {
+                    spokenReplies++
+                    Speaker.speak(plan.reply)
+                }
             }
 
             // ---- ACT ------------------------------------------------------
             if (plan.actions.isNotEmpty()) {
-                LogBus.log("Act: ${plan.actions.size} action(s)")
+                LogBus.log("Act #$step: ${plan.actions.size} action(s)")
                 withContext(Dispatchers.IO) {
                     DeviceController.execute(plan.actions)
                 }
@@ -108,15 +131,25 @@ object SQLAgentEngine {
             // ---- VERIFY ---------------------------------------------------
             val verifyOk = verify(accessibility, plan.expectType, plan.expectValue)
             previousVerifyOk = verifyOk
+            noProgressStreak = if (verifyOk) 0 else noProgressStreak + 1
 
             if (plan.done) {
                 if (verifyOk || plan.expectType == "none") {
                     completed = true
-                    LogBus.log("Task COMPLETE: $task", LogLevel.SUCCESS)
+                    LogBus.log("Task COMPLETE after $step step(s): $task", LogLevel.SUCCESS)
                     if (lastReply.isBlank()) Speaker.speak("Task completed.")
                     break
                 }
                 LogBus.log("Model said done but verification failed - continuing", LogLevel.WARN)
+            }
+
+            if (noProgressStreak >= NO_PROGRESS_LIMIT) {
+                LogBus.log(
+                    "Agent stopped: no verification progress after $NO_PROGRESS_LIMIT attempts",
+                    LogLevel.WARN
+                )
+                Speaker.speak("I could not complete that task.")
+                break
             }
 
             // ---- FEEDBACK for the next think ------------------------------
@@ -135,16 +168,28 @@ object SQLAgentEngine {
             }
             conversation.add(ChatMessage("user", feedback))
             trim(conversation)
+            refreshState(task, force = false)
         }
 
-        if (!completed) {
-            LogBus.log("Agent stopped at step budget for: \"$task\"", LogLevel.WARN)
-            Speaker.speak("I could not fully complete that task.")
-        }
+        spokenReplies = 0
         StateBus.setState(AssistantState.IDLE)
     }
 
     // ------------------------------------------------------------------ utils
+
+    /**
+     * Silent-mode status: updates the dashboard command only when the
+     * overlay would actually change (throttled) so continuous execution
+     * does not spam popups / redraws.
+     */
+    private fun refreshState(task: String, force: Boolean) {
+        val now = System.currentTimeMillis()
+        if (force || now - lastStateRefresh >= STATE_REFRESH_MS) {
+            lastStateRefresh = now
+            StateBus.setState(AssistantState.PROCESSING)
+            StateBus.setCommand(task)
+        }
+    }
 
     private fun verify(
         accessibility: SqlAccessibilityService,

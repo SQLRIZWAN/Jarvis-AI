@@ -114,9 +114,13 @@ fun DashboardScreen() {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column {
-                Text("SQL AI", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("SQL AI", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(8.dp))
+                    StateBadge(state = state)
+                }
                 Text(
-                    "24/7 phone-control assistant",
+                    "v1.2  ·  24/7 agentic phone assistant",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.outline
                 )
@@ -362,6 +366,30 @@ private fun VoiceOrb(state: AssistantState, level: Float) {
             contentDescription = null,
             tint = color,
             modifier = Modifier.size(40.dp)
+        )
+    }
+}
+
+/** Modern status pill used in the header. */
+@Composable
+private fun StateBadge(state: AssistantState) {
+    val (label, color) = when (state) {
+        AssistantState.LISTENING -> "LISTENING" to SqlCyan
+        AssistantState.PROCESSING -> "WORKING" to SqlWarn
+        AssistantState.IDLE -> "READY" to SqlSuccess
+        AssistantState.ERROR -> "ERROR" to SqlError
+        AssistantState.DISABLED -> "OFF" to MaterialTheme.colorScheme.outline
+    }
+    androidx.compose.material3.Surface(
+        shape = RoundedCornerShape(50),
+        color = color.copy(alpha = 0.16f)
+    ) {
+        Text(
+            label,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = color,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
         )
     }
 }

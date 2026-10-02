@@ -38,7 +38,7 @@ object HistoryStore {
 
 /**
  * Entry point of the assistant: keeps the state machine, single-flight mutex
- * and hands the actual work to the autonomous [SQLAgentEngine] ReAct loop.
+ * and hands the actual work to the unlimited [AgenticLoopEngine] loop.
  */
 object AssistantEngine {
 
@@ -69,7 +69,7 @@ object AssistantEngine {
             StateBus.setCommand(command)
             HistoryStore.addUser(command)
 
-            SQLAgentEngine.runTask(command, source)
+            AgenticLoopEngine.runTask(command, source)
 
             HistoryStore.addAssistant("completed: $command")
             StateBus.setState(AssistantState.IDLE)

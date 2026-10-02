@@ -1,6 +1,7 @@
 package com.sqlai.assistant.service
 
 import android.app.Notification
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -92,6 +93,7 @@ class ListeningService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
 
     @Volatile private var running = false
+    @Volatile private var wasRunning = false
     @Volatile private var isListening = false
     @Volatile private var processing = false
     @Volatile private var awaitingCommand = false
@@ -150,7 +152,41 @@ class ListeningService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * Keep the service alive 24/7: when the user swipes the app away or the
+     * system kills the task, schedule an immediate restart as long as the
+     * assistant is enabled in settings.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        scheduleRestart(1200)
+    }
+
+    private fun scheduleRestart(delayMs: Long) {
+        try {
+            val restart = Intent(applicationContext, ListeningService::class.java)
+                .setAction(ACTION_START)
+            val pending = PendingIntent.getService(
+                applicationContext,
+                7011,
+                restart,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            // Fresh handler - survives this service's own cleanup.
+            Handler(Looper.getMainLooper()).postDelayed({
+                try {
+                    pending.send()
+                } catch (e: Exception) {
+                    LogBus.log("Restart blocked: ${e.message}", LogLevel.WARN)
+                }
+            }, delayMs)
+        } catch (e: Exception) {
+            LogBus.log("Restart schedule failed: ${e.message}", LogLevel.WARN)
+        }
+    }
+
     override fun onDestroy() {
+        wasRunning = running
         running = false
         mainHandler.removeCallbacksAndMessages(null)
         settingsJob?.cancel()
@@ -167,6 +203,7 @@ class ListeningService : Service() {
         OverlayManager.hide()
         StateBus.setState(AssistantState.DISABLED)
         scope.cancel()
+        if (wasRunning) scheduleRestart(1500)
         super.onDestroy()
     }
 

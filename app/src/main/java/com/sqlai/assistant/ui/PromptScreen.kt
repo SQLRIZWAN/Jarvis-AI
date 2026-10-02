@@ -11,10 +11,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Restore
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Save
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,29 +27,43 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import com.sqlai.assistant.SqlAiApp
+import com.sqlai.assistant.core.CorePromptBuilder
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.ui.theme.SqlSuccess
 import kotlinx.coroutines.launch
 
+/**
+ * Prompt tab v1.2: users only edit their PERSONAL CONTEXT (name, preferences,
+ * custom style). The core system prompt - JSON schema, tool definitions and
+ * reasoning rules - is immutable in app code (CorePromptBuilder) and shown
+ * read-only here so it can never be edited or deleted by mistake.
+ */
 @Composable
 fun PromptScreen() {
     val scope = rememberCoroutineScope()
     val settings by SqlAiApp.settings.settings.collectAsState(initial = null)
 
-    var prompt by remember { mutableStateOf("") }
+    var userName by remember { mutableStateOf("") }
+    var preferences by remember { mutableStateOf("") }
+    var instructions by remember { mutableStateOf("") }
     var loaded by remember { mutableStateOf(false) }
     var saved by remember { mutableStateOf(false) }
 
     LaunchedEffect(settings) {
         val s = settings ?: return@LaunchedEffect
         if (!loaded) {
-            prompt = s.systemPrompt
+            userName = s.userName
+            preferences = s.userPreferences
+            instructions = s.userInstructions
             loaded = true
         }
     }
@@ -62,70 +76,135 @@ fun PromptScreen() {
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Spacer(Modifier.height(4.dp))
-        Text("System Prompt", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text("Memory & Prompt", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text(
-            "Tune how SQL AI thinks, speaks and which actions it is allowed to take",
+            "Tell SQL AI about yourself - the core brain stays protected",
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.outline
         )
 
-        SectionCard(title = "Behaviour & personality") {
-            OutlinedTextField(
-                value = prompt,
-                onValueChange = {
-                    prompt = it
-                    saved = false
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(380.dp),
-                textStyle = MaterialTheme.typography.bodySmall.copy(
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.5.sp
-                )
+        // ---------------------------------------------- protected core prompt
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
             )
-
-            Spacer(Modifier.height(8.dp))
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Button(onClick = {
-                    scope.launch {
-                        SqlAiApp.settings.setSystemPrompt(prompt)
-                        saved = true
-                        LogBus.log("System prompt updated", LogLevel.SUCCESS)
-                    }
-                }) {
-                    Text(if (saved) "Saved" else "Save prompt")
+        ) {
+            Column(Modifier.padding(14.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.Lock,
+                        contentDescription = null,
+                        tint = SqlSuccess,
+                        modifier = Modifier.height(16.dp)
+                    )
+                    Spacer(Modifier.padding(horizontal = 4.dp))
+                    Text(
+                        "Core System Prompt - PROTECTED",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "v1.2",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.outline
+                    )
                 }
-                Spacer(Modifier.padding(horizontal = 6.dp))
-                OutlinedButton(onClick = {
-                    scope.launch {
-                        SqlAiApp.settings.resetPrompt()
-                        prompt = com.sqlai.assistant.core.AppSettings.DEFAULT_SYSTEM_PROMPT
-                        saved = true
-                        LogBus.log("System prompt reset to default", LogLevel.WARN)
-                    }
-                }) {
-                    Text("Reset")
-                }
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(6.dp))
                 Text(
-                    "${prompt.length} chars",
-                    fontSize = 11.sp,
+                    "The JSON action schema, tool definitions and reasoning rules are " +
+                        "hardcoded in the app and cannot be edited - so the agent can " +
+                        "never break. Only your personal context below is appended at runtime.",
+                    fontSize = 11.5.sp,
                     color = MaterialTheme.colorScheme.outline
                 )
-            }
-
-            if (saved) {
-                Text("Stored on device", fontSize = 11.sp, color = SqlSuccess)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    buildString {
+                        append(CorePromptBuilder.CORE_AGENT.take(420))
+                        append(" ...")
+                    },
+                    fontSize = 10.sp,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.outline,
+                    maxLines = 8
+                )
             }
         }
 
-        SectionCard(title = "Tips") {
+        // ------------------------------------------------- editable context
+        SectionCard(title = "My details (editable)") {
+            OutlinedTextField(
+                value = userName,
+                onValueChange = {
+                    userName = it
+                    saved = false
+                },
+                label = { Text("What should I call you?") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                value = preferences,
+                onValueChange = {
+                    preferences = it
+                    saved = false
+                },
+                label = { Text("Personal preferences") },
+                placeholder = { Text("e.g. Reply in short sentences, I work night shifts...") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(120.dp),
+                minLines = 3
+            )
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                value = instructions,
+                onValueChange = {
+                    instructions = it
+                    saved = false
+                },
+                label = { Text("Custom style instructions") },
+                placeholder = { Text("e.g. Always greet me with 'Haanji', never use emojis") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(120.dp),
+                minLines = 3
+            )
+
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = {
+                    scope.launch {
+                        SqlAiApp.settings.setUserName(userName)
+                        SqlAiApp.settings.setUserPreferences(preferences)
+                        SqlAiApp.settings.setUserInstructions(instructions)
+                        saved = true
+                        LogBus.log("User memory saved", LogLevel.SUCCESS)
+                    }
+                }) {
+                    Icon(Icons.Filled.Save, contentDescription = null, modifier = Modifier.height(16.dp))
+                    Spacer(Modifier.padding(horizontal = 4.dp))
+                    Text(if (saved) "Saved" else "Save memory")
+                }
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "stored on device only",
+                    fontSize = 10.5.sp,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            }
+            if (saved) {
+                Text("Appended to the core prompt at runtime", fontSize = 11.sp, color = SqlSuccess)
+            }
+        }
+
+        SectionCard(title = "How it works") {
             Text(
-                "Keep the JSON action contract intact or the assistant will not be able to " +
-                    "control the phone. You can change tone, language, safety rules and the " +
-                    "wake-word behaviour from here.",
+                "Every AI call = [Immutable Core Prompt] + [Your details] + [Language] + " +
+                    "[Live screen]. Edit freely above - the brain of the agent is always safe.",
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.outline
             )
