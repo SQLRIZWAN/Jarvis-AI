@@ -9,7 +9,7 @@ taps, swipes and typing for you.
 | | |
 |---|---|
 | Repository | `Jarvis-AI` |
-| App name | **SQL AI v5.1 Ultimate Agent** (dynamic, version-stamped) |
+| App name | **SQL AI v5.2 Ultimate Agent** (dynamic, version-stamped) |
 | Package | `com.sqlai.assistant` |
 | Language | Kotlin + Jetpack Compose |
 | Min SDK | 26 (Android 8.0) |
@@ -18,6 +18,34 @@ taps, swipes and typing for you.
 
 ---
 
+## What's new in v5.2
+
+On-device reality check: mic sunta nahi tha, call pe awaaz jaati nahi thi,
+bolne me der hoti thi, taps galat jagah lagte the. v5.2 sab:
+
+- **BUG #1 Mic pipeline alive** - 300ms re-arm after ANY speech/mic release,
+  stuck-mic (>2s, no legit owner) auto-logged + force-recovered on screen,
+  live-mic leaked outside call auto-released, `canStartRecording` now honours
+  the STT preemption rule (call duplex mic was silently denied), permission
+  errors no longer kill the listen loop (30s retry, log once).
+- **BUG #2 Call audio routing with proof** - `verifyCallRoute()`
+  (in-comm/earpiece/vol) logged before+after; 3-tier delivery: Gemini
+  VOICE_COMMUNICATION -> forced mode re-switch + TTS `speakOnCall`
+  (waits for onDone = playback completed) -> speakerphone fallback.
+  Boolean result flows back; failure is SPOKEN after the call ends
+  ("call audio route failed"); duplex status logged as active or
+  "duplex unavailable (mic busy) - one-way message only".
+- **BUG #3 Speech never lags actions** - queue capped at 2 lines (oldest
+  dropped), lines older than 1.5s dropped at dequeue (only latest speaks),
+  `postPriority` jumps final replies to the front, TTS speeds up while
+  backlogged, final reply spoken right AFTER its action (0-lag).
+- **BUG #4 Screen accuracy >90%** - fuzzy taps only at >=85 similarity,
+  hard floor 80 (below = scroll/wait/rescan, never tap), off-screen bounds
+  rejected before clicking, screenshot attached to EVERY think (vision
+  always-on), `expect.area` (top/middle/bottom) verifies WHERE the element
+  is, prompt mandates 2x scroll -> re-scan -> alternate label order.
+
+---
 ## What's new in v5.1
 
 Real-world call-test feedback (v5.0.1) fixed - the WhatsApp call task used to

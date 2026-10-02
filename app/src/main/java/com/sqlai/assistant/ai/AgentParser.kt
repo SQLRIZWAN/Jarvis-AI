@@ -13,6 +13,8 @@ data class AgentPlan(
     val actions: List<Action>,
     val expectType: String,   // text_visible | app_foreground | none
     val expectValue: String,
+    /** BUG #4: optional screen region for verify - top | middle | bottom. */
+    val expectArea: String = "",
     /** BUG #2: label of the micro-goal completed by this step (persisted). */
     val milestone: String = ""
 )
@@ -43,6 +45,7 @@ object AgentParser {
                 actions = PlanParser.parseActions(obj),
                 expectType = expect?.optString("type")?.lowercase()?.ifBlank { "none" } ?: "none",
                 expectValue = expect?.optString("value").orEmpty(),
+                expectArea = expect?.optString("area").orEmpty().lowercase(),
                 milestone = obj.optString("milestone").trim()
             )
         } catch (e: Exception) {
@@ -53,6 +56,7 @@ object AgentParser {
                 actions = emptyList(),
                 expectType = "none",
                 expectValue = "",
+                expectArea = "",
                 milestone = ""
             )
         }

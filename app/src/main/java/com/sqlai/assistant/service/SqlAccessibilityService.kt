@@ -262,12 +262,11 @@ class SqlAccessibilityService : AccessibilityService() {
             if (text != null && text.equals(label, true)) offer(node, 92, "text exact")
             if (desc != null && desc.lowercase().contains(needle)) offer(node, 84, "content-desc contains")
             if (text != null && text.lowercase().contains(needle)) offer(node, 80, "text contains")
-            // Fuzzy fallback (>=0.60 similarity only, capped below contains).
+            // BUG #4: fuzzy ONLY at >=0.85 similarity (spec: fuzzy <85 never taps).
             val probe = (text ?: desc ?: "").lowercase()
             val sim = com.sqlai.assistant.device.ContactMatcher.similarity(needle, probe)
-            if (sim >= 0.60) {
-                val base = if (desc != null) 78 else 74
-                offer(node, minOf(76, (sim * base).toInt()), "fuzzy ${"%.2f".format(sim)}")
+            if (sim >= 0.85) {
+                offer(node, minOf(90, (sim * 100).toInt()), "fuzzy ${"%.2f".format(sim)}")
             }
             for (i in 0 until node.childCount) {
                 val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
@@ -289,9 +288,25 @@ class SqlAccessibilityService : AccessibilityService() {
             "[MATCH] '$label' conf=${match.confidence} via=${match.via}",
             com.sqlai.assistant.core.LogLevel.INFO
         )
-        if (match.confidence < 55) return false
+        // BUG #4: hard accuracy floor - below 80 we scroll/wait/rescan instead
+        // of tapping garbage (spec: fuzzy <85 rejected, weak matches rejected).
+        if (match.confidence < 80) return false
 
         val node = match.node
+        // BUG #4: verify bounds BEFORE acting - node must be on-screen.
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        if (rect.isEmpty) return false
+        val dm = resources.displayMetrics
+        if (rect.centerX() !in 0..dm.widthPixels ||
+            rect.centerY() !in 0..dm.heightPixels
+        ) {
+            com.sqlai.assistant.core.LogBus.log(
+                "[MATCH] '$label' off-screen bounds - rejected", com.sqlai.assistant.core.LogLevel.WARN
+            )
+            return false
+        }
+
         var clickable: AccessibilityNodeInfo? = node
         while (clickable != null && !clickable.isClickable) {
             clickable = clickable.parent
@@ -305,9 +320,6 @@ class SqlAccessibilityService : AccessibilityService() {
             if (performed) return true
         }
 
-        val rect = Rect()
-        node.getBoundsInScreen(rect)
-        if (rect.isEmpty) return false
         return tap(rect.centerX(), rect.centerY())
     }
 

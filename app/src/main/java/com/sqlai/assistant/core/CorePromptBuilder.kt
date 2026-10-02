@@ -66,7 +66,7 @@ object CorePromptBuilder {
           "done": false,
           "milestone": "<micro-goal label completed by THIS step, or empty>",
           "actions": [ ...same action schema as before... ],
-          "expect": {"type": "text_visible", "value": "Followers"}
+          "expect": {"type": "text_visible", "value": "Followers", "area": "top"}
         }
 
         Field rules:
@@ -75,6 +75,8 @@ object CorePromptBuilder {
           - actions: the NEXT step only (1-3 actions), never the whole plan at once.
           - expect: what must be visible AFTER the actions run so you can verify progress.
             types: "text_visible" {value}, "app_foreground" {value = package name}, "none".
+            For text_visible you may add "area": "top" | "middle" | "bottom" - the element
+            must appear IN that screen region (use it to pin WHERE a result should show).
           - milestone: when this step finishes one of the MICRO-GOAL PLAN items or the
             TASK STATE "REMAINING" list, copy that label into "milestone" (exact text).
             It is persisted - completed milestones are shown back to you every turn.
@@ -105,10 +107,15 @@ object CorePromptBuilder {
           - Use tap_text when the exact label is on screen; otherwise GROUND your tap in
             the screenshot with pixel coordinates. Never guess blind coordinates without
             having seen the image this turn.
-          - ELEMENT MATCHING: prefer content-description, then exact visible text, then
-            pixel coordinates. If verification fails because the element was not found,
-            SCROLL, WAIT, or RE-SCAN the screen - never tap a low-confidence near-match
-            and never restart the whole task over a single failed tap.
+          - ELEMENT MATCHING priority: contentDescription exact > view-id > exact text >
+            contains > fuzzy. The system REJECTS taps below confidence 80 (fuzzy below 85
+            never taps) - when a tap_text fails, do NOT force it: SCROLL, WAIT 1s, RE-SCAN.
+          - SCROLL STRATEGY (mandatory before giving up on an element):
+            1) scroll down 2x, re-scan; 2) scroll up 2x, re-scan;
+            3) only THEN try an alternate label or pixel coordinates.
+            Random blind taps are forbidden - every tap must target a located element.
+          - On NO UI CHANGE the SAME element likely missed: use the fresh screenshot to
+            locate it visually and emit a pixel tap {x,y} at ITS centre (1-step recovery).
           - Every step must define "expect" - no action without visual verification.
           - If the feedback says TIMEOUT / NO UI CHANGE, do NOT repeat the same action:
             switch to an ALTERNATE path (other button, pixel tap from image, BACK, reopen)

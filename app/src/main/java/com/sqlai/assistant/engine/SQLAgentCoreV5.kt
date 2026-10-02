@@ -140,8 +140,9 @@ object SQLAgentCoreV5 {
                 accessibility.captureScreenDetailed(70)
             }
             val softStuck = stuckStreak > 0
-            val needImage = settings.supportsVision() &&
-                (step == 1 || !previousVerifyOk || softStuck || usedCoordinateTap)
+            // BUG #4: vision grounding ALWAYS ON - every think() carries a
+            // screenshot so coordinate taps are computed from fresh pixels.
+            val needImage = settings.supportsVision()
             val image = if (needImage) captureJpeg(accessibility) else null
 
             val stateBlock = TaskStateManager.stateBlock()
@@ -181,7 +182,10 @@ object SQLAgentCoreV5 {
             LogBus.log("Think #$step: ${plan.thought.take(MAX_THOUGHT_LOG)}")
             if (plan.reply.isNotBlank() && !plan.reply.equals(lastReply, ignoreCase = true)) {
                 lastReply = plan.reply
-                announce(plan.reply) // live progress - non-blocking speech queue
+                // BUG #3: progress lines speak BEFORE the action (in sync);
+                // the FINAL (done) reply is held and spoken right after the
+                // action via postPriority - action first, voice follows 0-lag.
+                if (!plan.done) announce(plan.reply)
             }
 
             // ---- ACT (15 s watchdog - NEVER freezes; long actions get more)
@@ -249,7 +253,7 @@ object SQLAgentCoreV5 {
 
             // ---- VERIFY ---------------------------------------------------
             val verifyOk = if (timedOut) false else
-                verify(accessibility, plan.expectType, plan.expectValue)
+                verify(accessibility, plan.expectType, plan.expectValue, plan.expectArea)
             previousVerifyOk = verifyOk
 
             // BUG #2: persist the completed milestone so restarts / calls
@@ -263,7 +267,9 @@ object SQLAgentCoreV5 {
                     completed = true
                     TaskStateManager.clear(SqlAiApp.instance)
                     LogBus.log("Task COMPLETE after $step step(s): $task", LogLevel.SUCCESS)
-                    if (lastReply.isBlank()) Speaker.post("Task completed.")
+                    // BUG #3: final line jumps the queue (spoken next, backlog cleared).
+                    if (lastReply.isNotBlank()) Speaker.postPriority(lastReply)
+                    if (lastReply.isBlank()) Speaker.postPriority("Task completed.")
                     break
                 }
                 LogBus.log("Model said done but verification failed - continuing", LogLevel.WARN)
@@ -369,14 +375,35 @@ object SQLAgentCoreV5 {
     private fun verify(
         accessibility: SqlAccessibilityService,
         type: String,
-        value: String
+        value: String,
+        area: String = ""
     ): Boolean {
         if (type == "none" || value.isBlank()) return true
         return try {
             when (type) {
-                "text_visible" ->
-                    accessibility.captureScreenText(150).contains(value, ignoreCase = true) ||
-                        accessibility.captureScreenDetailed(120).contains(value, ignoreCase = true)
+                "text_visible" -> {
+                    val seen = accessibility.captureScreenText(150)
+                        .contains(value, ignoreCase = true) ||
+                        accessibility.captureScreenDetailed(120)
+                            .contains(value, ignoreCase = true)
+                    if (!seen) return false
+                    // BUG #4: when the model pins a region, the element must
+                    // actually be THERE - kills false-positives on old screens.
+                    if (area.isBlank()) return true
+                    val match = accessibility.findBestMatch(value) ?: return false
+                    if (match.confidence < 80) return false
+                    val rect = android.graphics.Rect()
+                    match.node.getBoundsInScreen(rect)
+                    if (rect.isEmpty) return false
+                    val dm = accessibility.resources.displayMetrics
+                    val cy = rect.centerY()
+                    when (area) {
+                        "top", "upper" -> cy < dm.heightPixels / 3
+                        "middle", "center" -> cy in dm.heightPixels / 3..(dm.heightPixels * 2 / 3)
+                        "bottom", "lower" -> cy > dm.heightPixels * 2 / 3
+                        else -> true
+                    }
+                }
 
                 "app_foreground" -> {
                     val front = accessibility.frontPackage()

@@ -61,15 +61,21 @@ object Speaker {
     /**
      * Serialized speech queue (Loop A of the dual-loop agent): producers call
      * [post] and return immediately so the task executor never blocks on TTS /
-     * Gemini Live round-trips. Order is preserved, no overlapping utterances.
+     * Gemini Live round-trips.
      *
-     * BUG #1 / FEATURE #3: every entry carries the epoch it was posted under.
-     * [flushQueued] bumps the epoch so anything queued BEFORE a call ended is
-     * dropped (never plays after the call). While a call session is active the
-     * consumer drops texts instead of speaking them on the normal speaker.
+     * BUG #3 (v5.2) - speech can never lag the actions:
+     *  - MAX 2 pending lines: posting a 3rd drops the OLDEST immediately,
+     *  - a line that waited >1.5s is dropped at dequeue time (stale progress
+     *    is worthless - only the latest is spoken),
+     *  - [postPriority] clears the backlog for final/important lines,
+     *  - while a backlog exists the Android TTS path speeds up ("fast mode").
      */
+    private class Pending(val text: String, val ts: Long, val epoch: Int)
+
     private val speechScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val speechQueue = Channel<Pair<Int, String>>(capacity = 64)
+    private val queueLock = Any()
+    private val pendingLines = ArrayDeque<Pending>()
+    private val signal = Channel<Unit>(Channel.CONFLATED)
     @Volatile private var queueEpoch = 0
     @Volatile private var consumerStarted = false
 
@@ -79,14 +85,43 @@ object Speaker {
      * never stalls the automation loop (and vice versa).
      */
     fun post(text: String) {
+        enqueue(text)
+    }
+
+    /**
+     * BUG #3: important line (task result / interrupt answer) - drops every
+     * stale pending line first so it speaks next.
+     */
+    fun postPriority(text: String) {
         if (text.isBlank()) return
-        speechQueue.trySend(queueEpoch to text)
+        synchronized(queueLock) {
+            val dropped = pendingLines.size
+            pendingLines.clear()
+            if (dropped > 0) LogBus.log("[Speaker] priority: dropped $dropped pending line(s)", LogLevel.INFO)
+        }
+        enqueue(text)
+    }
+
+    private fun enqueue(text: String) {
+        if (text.isBlank()) return
+        synchronized(queueLock) {
+            while (pendingLines.size >= 2) {
+                pendingLines.removeFirst()
+                LogBus.log("[Speaker] backlog>2 - dropped stale progress line", LogLevel.INFO)
+            }
+            pendingLines.addLast(Pending(text, System.currentTimeMillis(), queueEpoch))
+        }
+        signal.trySend(Unit)
         startQueueConsumer()
     }
+
+    /** Lines waiting to be spoken (0 = perfectly in sync). */
+    fun backlog(): Int = synchronized(queueLock) { pendingLines.size }
 
     /** Drop everything still queued (call ended / task reset). */
     fun flushQueued() {
         queueEpoch++
+        synchronized(queueLock) { pendingLines.clear() }
     }
 
     /** True while something is being spoken (TTS or Gemini Live). */
@@ -114,18 +149,33 @@ object Speaker {
             if (consumerStarted) return
             consumerStarted = true
             speechScope.launch {
-                for ((epoch, text) in speechQueue) {
-                    if (epoch != queueEpoch) continue // flushed - never play
-                    // FEATURE #3: no speaker output while a call session is
-                    // in progress (DIALING/RINGING/CONNECTED/SPEAKING).
-                    if (com.sqlai.assistant.service.CallStateMachine.isCallActive()) {
-                        LogBus.log("[Speaker] dropped during call: \"$text\"", LogLevel.INFO)
-                        continue
-                    }
-                    try {
-                        speak(text)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "queued speak failed", e)
+                for (u in signal) {
+                    while (true) {
+                        val item = synchronized(queueLock) {
+                            pendingLines.removeFirstOrNull()
+                        } ?: break
+                        if (item.epoch != queueEpoch) continue // flushed
+                        // BUG #3: a line older than 1.5s is stale progress -
+                        // drop it, only the freshest line matters.
+                        val age = System.currentTimeMillis() - item.ts
+                        if (age > 1_500) {
+                            LogBus.log(
+                                "[Speaker] dropped STALE line (${age}ms): \"${item.text.take(40)}\"",
+                                LogLevel.INFO
+                            )
+                            continue
+                        }
+                        // FEATURE #3: while a call session owns the audio,
+                        // nothing plays on the normal speaker.
+                        if (com.sqlai.assistant.service.CallStateMachine.isCallActive()) {
+                            LogBus.log("[Speaker] dropped during call: \"${item.text.take(40)}\"", LogLevel.INFO)
+                            continue
+                        }
+                        try {
+                            speak(item.text)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "queued speak failed", e)
+                        }
                     }
                 }
             }
@@ -215,7 +265,12 @@ object Speaker {
         }
         try {
             applyVoiceSettings(engine, settings)
-            engine.setSpeechRate(settings.ttsSpeed)
+            // BUG #3 "speaking fast" mode: while lines are queued the TTS
+            // speeds up so voice catches up with the actions (~500ms lag).
+            val rate = if (backlog() > 0) {
+                (settings.ttsSpeed * 1.2f).coerceAtMost(1.8f)
+            } else settings.ttsSpeed
+            engine.setSpeechRate(rate)
             engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "sqlai-${nextId()}")
         } catch (e: Exception) {
             LogBus.log("TTS error: ${e.message}", LogLevel.WARN)
