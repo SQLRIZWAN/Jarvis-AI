@@ -111,6 +111,11 @@ class ListeningService : Service() {
     override fun onCreate() {
         super.onCreate()
         Speaker.init(this)
+        // v6.0: when Speaker yields the mic for playback, cancel our
+        // recognizer session so ownership bookkeeping stays honest.
+        AudioManagerController.setPlaybackYieldHook {
+            mainHandler.post { if (isListening) cancelRecognition() }
+        }
         // v5: guardian watching accessibility + battery + this pipeline.
         AccessibilityWatchdogService.start(this)
     }
@@ -195,6 +200,7 @@ class ListeningService : Service() {
     override fun onDestroy() {
         wasRunning = running
         running = false
+        AudioManagerController.setPlaybackYieldHook(null)
         mainHandler.removeCallbacksAndMessages(null)
         settingsJob?.cancel()
         overlayJob?.cancel()
@@ -462,6 +468,14 @@ class ListeningService : Service() {
         if (!running || isListening) return
         if (speechPauseActive()) return
         if (!SpeechRecognizer.isRecognitionAvailable(this)) return
+        // v6.0: cross-subsystem record-open throttle (mic-reopen lockup fix).
+        if (!AudioManagerController.noteRecordAttempt()) {
+            mainHandler.postDelayed(
+                { if (running && !isListening) startRecognition() },
+                maxOf(AudioManagerController.recordCooldownRemainingMs(), 500L)
+            )
+            return
+        }
         // Exclusive mic ownership - never double-record with the live engine.
         // acquireMic applies the preemption rule (STT may be taken from none;
         // Gemini Live / call capture blocks STT until they release).

@@ -1,24 +1,17 @@
 package com.sqlai.assistant.core
 
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
-import android.os.Build
-import android.util.Log
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Single source of truth for microphone ownership + audio focus.
  *
- * Why this exists: SpeechRecognizer (wake-word loop), GeminiLiveAudioEngine
- * (duplex call audio) and SpeechCapture (one-shot) all want the mic. When two
- * of them record at once the second AudioRecord fails or the first one keeps
- * re-opening forever -> the classic "mic frozen / infinite reopen loop".
+ * v6.0: implementation moved into [AudioStreamManager] (mic ownership state
+ * machine, audio focus, record-open throttle, playback yield, call audio
+ * routing). This object stays as a thin facade so every existing call site
+ * and the nested [MicOwner] enum keep compiling unchanged.
  *
- * Rules enforced here:
+ * Rules enforced (in AudioStreamManager):
  *  - EXACTLY ONE owner may hold the mic at any time (exclusive, idempotent).
  *  - Audio focus is requested with AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE while
  *    recording and abandoned on release (never leaks).
@@ -26,6 +19,8 @@ import kotlinx.coroutines.flow.asStateFlow
  *    can never throw out of this controller and kill the calling service.
  *  - Call mode flips AudioManager mode between MODE_IN_COMMUNICATION and
  *    MODE_NORMAL so voice traffic routes to the call stream / Bluetooth.
+ *  - v6.0: mic is cleanly yielded before our own TTS/Gemini playback and
+ *    record-open floods are throttled instead of spinning forever.
  */
 object AudioManagerController {
 
@@ -33,255 +28,59 @@ object AudioManagerController {
 
     enum class MicOwner { NONE, STT, GEMINI_LIVE, CALL_CAPTURE, VOICE_NOTE }
 
-    private val _micOwner = MutableStateFlow(MicOwner.NONE)
-    val micOwner: StateFlow<MicOwner> = _micOwner.asStateFlow()
-
-    @Volatile private var micSince = 0L
-    @Volatile private var audioManager: AudioManager? = null
-    @Volatile private var focusRequest: AudioFocusRequest? = null
-    @Volatile private var callMode = false
+    val micOwner: StateFlow<MicOwner>
+        get() = AudioStreamManager.micOwner
 
     /** How long the current owner has held the mic (0 when free). */
-    fun micHeldMs(): Long {
-        val since = micSince
-        return if (since == 0L || _micOwner.value == MicOwner.NONE) 0L
-        else System.currentTimeMillis() - since
-    }
+    fun micHeldMs(): Long = AudioStreamManager.micHeldMs()
 
-    private fun am(context: Context): AudioManager? {
-        audioManager?.let { return it }
-        synchronized(this) {
-            audioManager?.let { return it }
-            audioManager = try {
-                context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            } catch (e: Exception) {
-                Log.w(TAG, "AudioManager unavailable", e)
-                null
-            }
-        }
-        return audioManager
-    }
+    fun acquireMic(context: Context, owner: MicOwner): Boolean =
+        AudioStreamManager.acquireMic(context, owner)
 
-    // ------------------------------------------------------------------- mic
+    fun releaseMic(owner: MicOwner) = AudioStreamManager.releaseMic(owner)
 
-    /**
-     * Try to take exclusive microphone ownership for [owner].
-     * Returns true when the caller now owns the mic (or already did).
-     * Never throws.
-     */
-    fun acquireMic(context: Context, owner: MicOwner): Boolean {
-        if (owner == MicOwner.NONE) return false
-        synchronized(this) {
-            val current = _micOwner.value
-            if (current == owner) return true
-            if (current == MicOwner.STT &&
-                (owner == MicOwner.GEMINI_LIVE ||
-                    owner == MicOwner.CALL_CAPTURE ||
-                    owner == MicOwner.VOICE_NOTE)
-            ) {
-                // Voice-call paths preempt the background wake-word loop; the
-                // STT owner observes the owner change and cancels its session.
-                _micOwner.value = owner
-                micSince = System.currentTimeMillis()
-                Log.w(TAG, "Mic preempted: STT -> ${owner.name}")
-                requestFocus(context)
-                return true
-            }
-            if (current != MicOwner.NONE) {
-                Log.w(TAG, "Mic busy (${current.name}) - denying ${owner.name}")
-                return false
-            }
-            _micOwner.value = owner
-            micSince = System.currentTimeMillis()
-        }
-        requestFocus(context)
-        Log.d(TAG, "Mic acquired by ${owner.name}")
-        return true
-    }
+    fun ownsMic(owner: MicOwner): Boolean = AudioStreamManager.ownsMic(owner)
 
-    /** Release the mic when (and only when) [owner] currently holds it. */
-    fun releaseMic(owner: MicOwner) {
-        synchronized(this) {
-            if (_micOwner.value != owner) return
-            _micOwner.value = MicOwner.NONE
-            micSince = 0L
-        }
-        abandonFocus()
-        Log.d(TAG, "Mic released by ${owner.name}")
-    }
+    fun canStartRecording(context: Context, owner: MicOwner): Boolean =
+        AudioStreamManager.canStartRecording(context, owner)
 
-    /** Convenience: does [owner] currently hold the mic? */
-    fun ownsMic(owner: MicOwner): Boolean = _micOwner.value == owner
+    fun forceRelease() = AudioStreamManager.forceRelease()
 
-    /** True when the mic is free for [owner] to start recording. */
-    fun canStartRecording(context: Context, owner: MicOwner): Boolean {
-        val current = _micOwner.value
-        if (current == owner) return true
-        // Delegates to acquireMic so the STT -> voice-call preemption rule
-        // applies here too (was: GEMINI_LIVE/CALL_CAPTURE silently denied
-        // while the wake-word loop held the mic -> call duplex never heard).
-        return acquireMic(context, owner)
-    }
+    // ------------------------------------------------- v6.0 new (facade) ----
 
-    /** Force-release whatever holds the mic (call/STT handover, crash recovery). */
-    fun forceRelease() {
-        val previous = synchronized(this) {
-            val p = _micOwner.value
-            _micOwner.value = MicOwner.NONE
-            micSince = 0L
-            p
-        }
-        if (previous != MicOwner.NONE) {
-            abandonFocus()
-            Log.w(TAG, "Mic force-released from ${previous.name}")
-        }
-    }
+    /** Clean STT hand-off before TTS / Gemini playback starts. */
+    fun yieldMicForPlayback(): Boolean = AudioStreamManager.yieldMicForPlayback()
+
+    /** ListeningService hook: cancel the recognizer session on yield. */
+    fun setPlaybackYieldHook(hook: (() -> Unit)?) =
+        AudioStreamManager.setPlaybackYieldHook(hook)
+
+    /** Record-open throttle: false = in cooldown, back off. */
+    fun noteRecordAttempt(): Boolean = AudioStreamManager.noteRecordAttempt()
+
+    fun recordCooldownRemainingMs(): Long = AudioStreamManager.recordCooldownRemainingMs()
 
     // --------------------------------------------------------------- focus
 
-    private fun requestFocus(context: Context) {
-        try {
-            val manager = am(context) ?: return
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build()
-                    )
-                    .setWillPauseWhenDucked(false)
-                    .setOnAudioFocusChangeListener { change ->
-                        if (change == AudioManager.AUDIOFOCUS_LOSS ||
-                            change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
-                        ) {
-                            Log.w(TAG, "Audio focus lost (${_micOwner.value.name})")
-                        }
-                    }
-                    .build()
-                focusRequest = request
-                manager.requestAudioFocus(request)
-            } else {
-                @Suppress("DEPRECATION")
-                manager.requestAudioFocus(
-                    { },
-                    AudioManager.STREAM_VOICE_CALL,
-                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
-                )
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "requestAudioFocus failed", e)
-        }
-    }
+    fun boostMediaVolume(context: Context): Int =
+        AudioStreamManager.boostMediaVolume(context)
 
-    private fun abandonFocus() {
-        try {
-            val manager = audioManager ?: return
-            val request = focusRequest
-            if (request != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                manager.abandonAudioFocusRequest(request)
-            } else {
-                @Suppress("DEPRECATION")
-                manager.abandonAudioFocus { }
-            }
-            focusRequest = null
-        } catch (e: Exception) {
-            Log.w(TAG, "abandonAudioFocus failed", e)
-        }
-    }
-
-    // ------------------------------------------------- voice-note recording
-
-    /**
-     * G3 - temporarily raise media volume so WhatsApp's mic clearly picks up
-     * the TTS being spoken into the voice note. Returns the previous volume
-     * (-1 when unavailable) for [restoreMediaVolume].
-     */
-    fun boostMediaVolume(context: Context): Int {
-        return try {
-            val m = am(context) ?: return -1
-            val cur = m.getStreamVolume(AudioManager.STREAM_MUSIC)
-            val max = m.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-            val target = (max * 7 / 10).coerceAtLeast(cur)
-            if (target != cur) m.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
-            cur
-        } catch (e: Exception) {
-            Log.w(TAG, "boostMediaVolume failed", e)
-            -1
-        }
-    }
-
-    fun restoreMediaVolume(context: Context, oldVolume: Int) {
-        if (oldVolume < 0) return
-        try {
-            am(context)?.setStreamVolume(AudioManager.STREAM_MUSIC, oldVolume, 0)
-        } catch (e: Exception) {
-            Log.w(TAG, "restoreMediaVolume failed", e)
-        }
-    }
+    fun restoreMediaVolume(context: Context, oldVolume: Int) =
+        AudioStreamManager.restoreMediaVolume(context, oldVolume)
 
     // ----------------------------------------------------------- call audio
 
-    /**
-     * Route audio through the phone-call stream (earpiece / call Bluetooth
-     * headset). Safe to call repeatedly; never throws.
-     */
-    fun enterCallAudioMode(context: Context, speakerphone: Boolean = false) {
-        try {
-            callMode = true
-            val manager = am(context) ?: return
-            manager.mode = AudioManager.MODE_IN_COMMUNICATION
-            manager.isSpeakerphoneOn = speakerphone
-        } catch (e: Exception) {
-            Log.w(TAG, "enterCallAudioMode failed", e)
-        }
-    }
+    fun enterCallAudioMode(context: Context, speakerphone: Boolean = false) =
+        AudioStreamManager.enterCallAudioMode(context, speakerphone)
 
-    fun exitCallAudioMode(context: Context) {
-        try {
-            callMode = false
-            val manager = am(context) ?: return
-            manager.isSpeakerphoneOn = false
-            manager.mode = AudioManager.MODE_NORMAL
-        } catch (e: Exception) {
-            Log.w(TAG, "exitCallAudioMode failed", e)
-        }
-    }
+    fun exitCallAudioMode(context: Context) =
+        AudioStreamManager.exitCallAudioMode(context)
 
-    fun isCallMode(): Boolean = callMode
+    fun isCallMode(): Boolean = AudioStreamManager.isCallMode()
 
-    /**
-     * BUG #2 - route diagnostics proving where call audio is going:
-     * "in-comm|normal / earpiece|speaker / vol=N". Logged before+after every
-     * on-call message so a failed uplink is visible instead of silent.
-     */
-    fun verifyCallRoute(context: Context): String {
-        return try {
-            val m = am(context) ?: return "no-audio-manager"
-            val mode = when (m.mode) {
-                AudioManager.MODE_IN_COMMUNICATION -> "in-comm"
-                AudioManager.MODE_NORMAL -> "normal"
-                AudioManager.MODE_IN_CALL -> "in-call"
-                else -> "mode=${m.mode}"
-            }
-            val out = if (m.isSpeakerphoneOn) "speaker" else "earpiece"
-            val vol = try {
-                m.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
-            } catch (e: Exception) {
-                -1
-            }
-            "$mode/$out/vol=$vol"
-        } catch (e: Exception) {
-            "route-error:${e.message}"
-        }
-    }
+    fun verifyCallRoute(context: Context): String =
+        AudioStreamManager.verifyCallRoute(context)
 
-    /** Mute/unmute the mic at the system level (used while the model speaks). */
-    fun setMicMuted(context: Context, muted: Boolean) {
-        try {
-            am(context)?.isMicrophoneMute = muted
-        } catch (e: Exception) {
-            Log.w(TAG, "setMicMuted failed", e)
-        }
-    }
+    fun setMicMuted(context: Context, muted: Boolean) =
+        AudioStreamManager.setMicMuted(context, muted)
 }

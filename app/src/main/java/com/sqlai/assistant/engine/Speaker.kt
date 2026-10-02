@@ -11,6 +11,7 @@ import com.sqlai.assistant.ai.GeminiLiveAudioEngine
 import com.sqlai.assistant.ai.GeminiMaleVoiceStreamer
 import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.AppSettings
+import com.sqlai.assistant.core.AudioManagerController
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.core.VoiceGender
@@ -276,6 +277,10 @@ object Speaker {
         val settings = SqlAiApp.settings.settings.first()
         if (!settings.ttsEnabled) return
 
+        // v6.0: release the STT mic cleanly BEFORE any playback route runs
+        // (TTS/Gemini). fastRearm/watchdog re-arm it after speech ends.
+        AudioManagerController.yieldMicForPlayback()
+
         // ---- preferred 1: Gemini MALE voice streamer (v5 enforced) --------
         // Direct WebSocket native audio, hardcoded Puck/Fenrir male profile.
         // Android TTS is bypassed whenever this delivers.
@@ -386,6 +391,8 @@ object Speaker {
      */
     suspend fun speakOnCall(text: String, settings: AppSettings, timeoutMs: Long = 15000): Boolean {
         if (text.isBlank()) return false
+        // v6.0: same clean mic hand-off before call-stream TTS.
+        AudioManagerController.yieldMicForPlayback()
         // G2 F3: wait up to 4s for the engine instead of failing instantly.
         val engine = awaitReady(4000) ?: run {
             LogBus.log("[Speaker] speakOnCall: TTS unavailable", LogLevel.WARN)

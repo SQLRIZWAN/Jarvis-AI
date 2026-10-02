@@ -676,6 +676,8 @@ object GeminiLiveAudioEngine {
     private suspend fun openRecordWithRetry(generation: Long): AudioRecord? {
         repeat(2) { attempt ->
             if (micGeneration.get() != generation) return null
+            // v6.0: cross-subsystem record-open throttle (lockup fix).
+            if (!AudioManagerController.noteRecordAttempt()) return null
             val rec = openRecord()
             if (rec != null) return rec
             if (attempt == 0) delay(500)
