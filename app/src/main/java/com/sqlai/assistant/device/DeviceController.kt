@@ -63,6 +63,130 @@ object DeviceController {
         else -> action.type
     }
 
+    /**
+     * G3 - record a WhatsApp voice note.
+     *
+     * WhatsApp's own AudioRecord captures the mic while its mic button is
+     * held - so the flow is: locate the mic button (content-desc / screen
+     * dump), pause our STT loop (mic ownership), optionally speak [text]
+     * LOUD (media volume boost) so it is picked up acoustically, hold the
+     * button for the estimated duration, restore everything in `finally`.
+     * Never blind-taps: a missed mic with typed text would SEND TEXT - the
+     * exact bug this action replaces.
+     */
+    private suspend fun performVoiceNote(action0: SqlAccessibilityService?, action: Action): Boolean {
+        val accessibility = action0
+        if (accessibility == null) {
+            Speaker.postPriority("I need the accessibility service for this.")
+            return false
+        }
+        val message = action.text.orEmpty().trim()
+        val explicitMs = action.ms ?: action.durationMs
+        val holdMs = (explicitMs ?: estimateVoiceNoteMs(message)).coerceIn(1_500, 45_000)
+        val target = resolveVoiceNoteTarget(accessibility) ?: run {
+            LogBus.log("[VOICE-NOTE] mic button not found (message box empty?)", LogLevel.WARN)
+            Speaker.postPriority("Mic button nahi mila. Message box khali hai?")
+            return false
+        }
+
+        val ctx = SqlAiApp.instance
+        // Ownership pauses the wake-word loop only - WhatsApp records the mic
+        // itself; we just keep our STT from fighting it mid-hold.
+        val owned = AudioManagerController.acquireMic(
+            ctx, AudioManagerController.MicOwner.VOICE_NOTE
+        )
+        var oldVol = -1
+        try {
+            if (message.isNotBlank()) {
+                oldVol = AudioManagerController.boostMediaVolume(ctx)
+                Speaker.postPriority(message) // spoken INTO the voice note
+                delay(250)
+            } else {
+                Speaker.postPriority("Boliye, voice note record ho raha hai")
+                delay(600)
+            }
+            LogBus.log(
+                "[VOICE-NOTE] hold (${target.x},${target.y}) ${holdMs}ms " +
+                    "tts=${message.isNotBlank()}",
+                LogLevel.INFO
+            )
+            val held = CoordinateGestureExecutor.hold(target.x, target.y, holdMs)
+            LogBus.log(
+                "[VOICE-NOTE] ${if (held) "recorded" else "GESTURE FAILED"}",
+                if (held) LogLevel.SUCCESS else LogLevel.WARN
+            )
+            if (!held) {
+                Speaker.postPriority("Voice note record nahi ho paya")
+                return false
+            }
+            return true
+        } finally {
+            AudioManagerController.restoreMediaVolume(ctx, oldVol)
+            if (owned) {
+                AudioManagerController.releaseMic(AudioManagerController.MicOwner.VOICE_NOTE)
+            }
+        }
+    }
+
+    /** ~400ms per word + lead-in, clamped to sane bounds. */
+    private fun estimateVoiceNoteMs(message: String): Int {
+        if (message.isBlank()) return 6_000 // user speaks live
+        val words = message.split(Regex("\\s+")).size
+        return (words * 400 + 1_800).coerceIn(2_500, 45_000)
+    }
+
+    /**
+     * Locate the WhatsApp mic button - content-desc first, then the screen
+     * dump. Returns null (caller announces) instead of guessing: a blind
+     * hold at the bottom-right with typed text would send plain TEXT.
+     */
+    private suspend fun resolveVoiceNoteTarget(
+        accessibility: SqlAccessibilityService
+    ): android.graphics.Point? {
+        val labels = listOf(
+            "Record voice message",
+            "Record voice",
+            "Record",
+            "recording",
+            "माइक रिकॉर्ड करें",
+            "वॉइस मैसेज"
+        )
+        for (label in labels) {
+            val m = accessibility.findBestMatch(label) ?: continue
+            if (m.confidence >= 70) {
+                val r = android.graphics.Rect()
+                m.node.getBoundsInScreen(r)
+                if (!r.isEmpty) {
+                    LogBus.log(
+                        "[VOICE-NOTE] mic via ${m.via} conf=${m.confidence} " +
+                            "at (${r.centerX()},${r.centerY()})",
+                        LogLevel.INFO
+                    )
+                    return android.graphics.Point(r.centerX(), r.centerY())
+                }
+            }
+        }
+        // Screen-dump fallback: any line that carries bounds + "record".
+        val line = accessibility.captureScreenDetailed(100)
+            .lineSequence()
+            .firstOrNull { it.contains("record", ignoreCase = true) }
+        if (line != null) {
+            val mt = Regex("\"([^\"]*)\"\\s*\\[(\\d+),(\\d+)\\s+(\\d+)x(\\d+)]").find(line)
+            if (mt != null) {
+                val g = mt.groupValues
+                val l = g[2].toIntOrNull() ?: 0
+                val t = g[3].toIntOrNull() ?: 0
+                val w = g[4].toIntOrNull() ?: 0
+                val h = g[5].toIntOrNull() ?: 0
+                if (w in 1..600 && h in 1..600) {
+                    LogBus.log("[VOICE-NOTE] mic via dump: ${g[1].take(30)}", LogLevel.INFO)
+                    return android.graphics.Point(l + w / 2, t + h / 2)
+                }
+            }
+        }
+        return null
+    }
+
     private suspend fun perform(action: Action) {
         val accessibility = SqlAccessibilityService.instance
         when (action.type) {
@@ -117,6 +241,13 @@ object DeviceController {
             "scroll" -> {
                 accessibility?.scroll(action.direction ?: "down")
                 delay(350)
+            }
+
+            "voice_note" -> {
+                // G3 - true WhatsApp voice note: press-and-hold the mic while
+                // WhatsApp records (assistant's words spoken into the mic, or
+                // the user's own voice when no text is given).
+                performVoiceNote(accessibility, action)
             }
 
             "type_text" -> {

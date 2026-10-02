@@ -42,9 +42,13 @@ object CorePromptBuilder {
           read_screen {}                 read_notifications {}
           wait {ms}
           wa_call {text: contact name, message: "what to say over the call"}
+          voice_note {text: "words to record", ms: 8000}  (WhatsApp voice note - holds mic)
           speak {text: sentence to say aloud now}
 
-        Rules: pick the shortest action path, never invent text that is not on screen,
+        Rules: for ANY voice message / voice-note request use voice_note (NEVER
+        type_text - that sends plain TEXT). The chat must be OPEN and the message
+        box EMPTY first (tap the X if needed). Otherwise: pick the shortest action
+        path, never invent text that is not on screen,
         confirm in "reply" before acting, and if the command needs no action return an empty actions array.
         "reply" is SPOKEN ALOUD IMMEDIATELY - make it a natural, useful confirmation
         (the contact and app name in the user's language), not filler.
@@ -97,6 +101,7 @@ object CorePromptBuilder {
           set_volume {value} volume_up {} volume_down {}
           read_notifications {} open_settings {item}
           wa_call {text: contact name, message: "spoken line delivered live over the call"}
+          voice_note {text: "what to say", ms: 8000}  <-- WhatsApp voice note (holds mic)
           speak {text: line to speak aloud right now}
 
         Hard rules:
@@ -129,6 +134,11 @@ object CorePromptBuilder {
             On EACH step give a short, distinct progress line in the user's language
             ("Opening WhatsApp now...", "Searching for Mohan...", "Placing the call...").
             Never repeat the same line twice; never stay silent for more than 2 steps.
+          - VOICE NOTE: voice_note {text, ms} presses-and-holds the mic so WhatsApp
+            records a real voice note. For "voice message"/"voice note" requests use
+            ONLY this - never type_text (it would send TEXT). Chat open + box EMPTY
+            (tap the X / undo first if text is present). Omit text to let the user
+            speak live (ms then defaults to ~6s).
           - WhatsApp calling: use wa_call with the on-screen contact name and put the
             exact sentence the user wants delivered into "message". wa_call BLOCKS until
             the call ends - the message is spoken ON the call automatically. When it

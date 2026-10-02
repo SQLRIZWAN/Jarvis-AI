@@ -106,6 +106,17 @@ object CoordinateGestureExecutor {
         return tap(bounds.centerX(), bounds.centerY())
     }
 
+    /**
+     * G3 - press-and-hold at exact screen coordinates (voice-note recording).
+     * Clamped like every other gesture.
+     */
+    suspend fun hold(x: Int, y: Int, durationMs: Int): Boolean =
+        withContext(Dispatchers.IO) {
+            val accessibility = SqlAccessibilityService.instance ?: return@withContext false
+            val p = clamp(x, y)
+            accessibility.hold(p.x, p.y, durationMs)
+        }
+
     /** Exact-pixel swipe from (x1,y1) to (x2,y2). */
     suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int): Boolean =
         withContext(Dispatchers.IO) {

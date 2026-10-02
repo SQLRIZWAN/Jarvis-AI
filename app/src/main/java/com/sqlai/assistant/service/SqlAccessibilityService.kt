@@ -248,6 +248,17 @@ class SqlAccessibilityService : AccessibilityService() {
 
     // ----------------------------------------------------------- tap / gestures
 
+    /**
+     * G3 - PRESS AND HOLD at (x, y) for [durationMs] (single-point stroke).
+     * The missing primitive for WhatsApp voice notes: the mic button must be
+     * held down while recording (a tap only opens nothing; ACTION_CLICK on
+     * the mic does not record).
+     */
+    suspend fun hold(x: Int, y: Int, durationMs: Int): Boolean {
+        val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+        return dispatch(path, durationMs.coerceIn(500, 60_000).toLong())
+    }
+
     /** Tap exact screen coordinates. */
     suspend fun tap(x: Int, y: Int): Boolean {
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }

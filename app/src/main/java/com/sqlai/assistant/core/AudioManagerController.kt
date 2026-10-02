@@ -31,7 +31,7 @@ object AudioManagerController {
 
     private const val TAG = "AudioMgrCtrl"
 
-    enum class MicOwner { NONE, STT, GEMINI_LIVE, CALL_CAPTURE }
+    enum class MicOwner { NONE, STT, GEMINI_LIVE, CALL_CAPTURE, VOICE_NOTE }
 
     private val _micOwner = MutableStateFlow(MicOwner.NONE)
     val micOwner: StateFlow<MicOwner> = _micOwner.asStateFlow()
@@ -75,7 +75,9 @@ object AudioManagerController {
             val current = _micOwner.value
             if (current == owner) return true
             if (current == MicOwner.STT &&
-                (owner == MicOwner.GEMINI_LIVE || owner == MicOwner.CALL_CAPTURE)
+                (owner == MicOwner.GEMINI_LIVE ||
+                    owner == MicOwner.CALL_CAPTURE ||
+                    owner == MicOwner.VOICE_NOTE)
             ) {
                 // Voice-call paths preempt the background wake-word loop; the
                 // STT owner observes the owner change and cancels its session.
@@ -185,6 +187,36 @@ object AudioManagerController {
             focusRequest = null
         } catch (e: Exception) {
             Log.w(TAG, "abandonAudioFocus failed", e)
+        }
+    }
+
+    // ------------------------------------------------- voice-note recording
+
+    /**
+     * G3 - temporarily raise media volume so WhatsApp's mic clearly picks up
+     * the TTS being spoken into the voice note. Returns the previous volume
+     * (-1 when unavailable) for [restoreMediaVolume].
+     */
+    fun boostMediaVolume(context: Context): Int {
+        return try {
+            val m = am(context) ?: return -1
+            val cur = m.getStreamVolume(AudioManager.STREAM_MUSIC)
+            val max = m.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val target = (max * 7 / 10).coerceAtLeast(cur)
+            if (target != cur) m.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+            cur
+        } catch (e: Exception) {
+            Log.w(TAG, "boostMediaVolume failed", e)
+            -1
+        }
+    }
+
+    fun restoreMediaVolume(context: Context, oldVolume: Int) {
+        if (oldVolume < 0) return
+        try {
+            am(context)?.setStreamVolume(AudioManager.STREAM_MUSIC, oldVolume, 0)
+        } catch (e: Exception) {
+            Log.w(TAG, "restoreMediaVolume failed", e)
         }
     }
 

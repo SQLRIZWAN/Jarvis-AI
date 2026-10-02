@@ -407,6 +407,10 @@ class ListeningService : Service() {
         if (owner == AudioManagerController.MicOwner.CALL_CAPTURE) {
             // One-shot capture has its own 12s timeout - only force past it.
             if (AudioManagerController.micHeldMs() <= 15_000) return
+        } else if (owner == AudioManagerController.MicOwner.VOICE_NOTE) {
+            // G3: an active voice-note hold is legitimate for up to 45s -
+            // never force-release it mid-recording (would cut the note).
+            if (AudioManagerController.micHeldMs() <= 45_000) return
         } else if (callSessionActive()) {
             return // duplex during a call may legitimately hold the mic
         } else if (owner == AudioManagerController.MicOwner.GEMINI_LIVE &&
