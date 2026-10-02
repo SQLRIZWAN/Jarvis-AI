@@ -14,6 +14,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -36,13 +40,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sqlai.assistant.BuildConfig
 import com.sqlai.assistant.SqlAiApp
+import com.sqlai.assistant.core.AssistantLanguage
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
+import com.sqlai.assistant.core.VoiceGender
 import com.sqlai.assistant.engine.HistoryStore
 import com.sqlai.assistant.engine.Speaker
 import com.sqlai.assistant.service.ListeningService
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen() {
     val context = LocalContext.current
@@ -50,12 +57,17 @@ fun SettingsScreen() {
     val settings by SqlAiApp.settings.settings.collectAsState(initial = null)
 
     var wakeWord by remember { mutableStateOf("sql") }
+    var autoReplyTemplate by remember { mutableStateOf("") }
     var loaded by remember { mutableStateOf(false) }
+
+    var genderMenuOpen by remember { mutableStateOf(false) }
+    var languageMenuOpen by remember { mutableStateOf(false) }
 
     LaunchedEffect(settings) {
         val s = settings ?: return@LaunchedEffect
         if (!loaded) {
             wakeWord = s.wakeWord
+            autoReplyTemplate = s.autoReplyTemplate
             loaded = true
         }
     }
@@ -90,8 +102,190 @@ fun SettingsScreen() {
             )
         }
 
-        // ----------------------------------------------------- behaviour
-        SectionCard(title = "Assistant behaviour") {
+        // ----------------------------------------------------- language
+        SectionCard(title = "Language (commands + replies)") {
+            ExposedDropdownMenuBox(
+                expanded = languageMenuOpen,
+                onExpandedChange = { languageMenuOpen = it }
+            ) {
+                OutlinedTextField(
+                    value = settings?.language?.label ?: AssistantLanguage.ENGLISH.label,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Assistant language") },
+                    trailingIcon = {
+                        ExposedDropdownMenuDefaults.TrailingIcon(expanded = languageMenuOpen)
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .menuAnchor()
+                )
+                ExposedDropdownMenu(
+                    expanded = languageMenuOpen,
+                    onDismissRequest = { languageMenuOpen = false }
+                ) {
+                    AssistantLanguage.entries.forEach { lang ->
+                        DropdownMenuItem(
+                            text = { Text(lang.label) },
+                            onClick = {
+                                languageMenuOpen = false
+                                scope.launch { SqlAiApp.settings.setLanguage(lang) }
+                                LogBus.log("Language: ${lang.label}", LogLevel.SUCCESS)
+                            }
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Button(onClick = { scope.launch { Speaker.speak("Namaste! SQL AI taiyaar hai.") } }) {
+                    Text("Test voice")
+                }
+                OutlinedButton(onClick = {
+                    ListeningService.start(context)
+                    LogBus.log("Listening restarted (language applied)")
+                }) {
+                    Text("Apply to mic")
+                }
+            }
+        }
+
+        // -------------------------------------------------- voice (gender)
+        SectionCard(title = "Voice") {
+            ExposedDropdownMenuBox(
+                expanded = genderMenuOpen,
+                onExpandedChange = { genderMenuOpen = it }
+            ) {
+                OutlinedTextField(
+                    value = settings?.voiceGender?.label ?: VoiceGender.MALE.label,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Voice gender") },
+                    trailingIcon = {
+                        ExposedDropdownMenuDefaults.TrailingIcon(expanded = genderMenuOpen)
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .menuAnchor()
+                )
+                ExposedDropdownMenu(
+                    expanded = genderMenuOpen,
+                    onDismissRequest = { genderMenuOpen = false }
+                ) {
+                    VoiceGender.entries.forEach { gender ->
+                        DropdownMenuItem(
+                            text = { Text(gender.label) },
+                            onClick = {
+                                genderMenuOpen = false
+                                scope.launch { SqlAiApp.settings.setVoiceGender(gender) }
+                            }
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Pitch: ${"%.2f".format(settings?.pitch ?: 1f)}",
+                fontSize = 12.sp
+            )
+            Slider(
+                value = settings?.pitch ?: 1f,
+                onValueChange = { v -> scope.launch { SqlAiApp.settings.setPitch(v) } },
+                valueRange = 0.5f..2.0f
+            )
+
+            Text(
+                "Speed: ${"%.1f".format(settings?.ttsSpeed ?: 1f)}x",
+                fontSize = 12.sp
+            )
+            Slider(
+                value = settings?.ttsSpeed ?: 1f,
+                onValueChange = { v -> scope.launch { SqlAiApp.settings.setTtsSpeed(v) } },
+                valueRange = 0.5f..2.0f
+            )
+        }
+
+        // --------------------------------------------------- agent + vision
+        SectionCard(title = "Agent (task completion)") {
+            ToggleRow(
+                title = "Screen vision (screenshot)",
+                subtitle = "Let the AI actually SEE the screen (Gemini/vision models)",
+                checked = settings?.screenVisionEnabled == true,
+                onCheckedChange = { v ->
+                    scope.launch { SqlAiApp.settings.setScreenVisionEnabled(v) }
+                }
+            )
+            val steps = settings?.agentMaxSteps ?: 8
+            Text("Max agent steps per task: $steps", fontSize = 12.sp)
+            Slider(
+                value = steps.toFloat(),
+                onValueChange = { v ->
+                    scope.launch { SqlAiApp.settings.setAgentMaxSteps(v.toInt()) }
+                },
+                valueRange = 1f..20f,
+                steps = 18
+            )
+            Text(
+                "Think -> Act -> Verify loop retries until the task is verified complete.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.outline
+            )
+        }
+
+        // --------------------------------------------- automation toggles
+        SectionCard(title = "Automation") {
+            ToggleRow(
+                title = "WhatsApp / SMS auto-reply",
+                subtitle = "Reply automatically to incoming messages",
+                checked = settings?.autoReplyEnabled == true,
+                onCheckedChange = { v ->
+                    scope.launch { SqlAiApp.settings.setAutoReplyEnabled(v) }
+                }
+            )
+            if (settings?.autoReplyEnabled == true) {
+                OutlinedTextField(
+                    value = autoReplyTemplate,
+                    onValueChange = {
+                        autoReplyTemplate = it
+                        scope.launch { SqlAiApp.settings.setAutoReplyTemplate(it) }
+                    },
+                    label = { Text("Fallback reply (when AI is offline)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Needs Notification Access + Accessibility ON.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            ToggleRow(
+                title = "Call assistant (live voice on call)",
+                subtitle = "Auto-receive calls, speak + listen during the call",
+                checked = settings?.callAssistantEnabled == true,
+                onCheckedChange = { v ->
+                    scope.launch { SqlAiApp.settings.setCallAssistantEnabled(v) }
+                }
+            )
+            if (settings?.callAssistantEnabled == true) {
+                Text(
+                    "Needs Phone + Answer calls permissions. Also answers WhatsApp calls " +
+                        "by tapping the Answer button.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+
             ToggleRow(
                 title = "24/7 listening service",
                 subtitle = "Keep the microphone service alive in background",
@@ -111,7 +305,7 @@ fun SettingsScreen() {
             )
             ToggleRow(
                 title = "Live screen context",
-                subtitle = "Send the current screen text to the AI for smarter actions",
+                subtitle = "Send the current screen text to the AI",
                 checked = settings?.screenContextEnabled == true,
                 onCheckedChange = { v -> scope.launch { SqlAiApp.settings.setScreenContextEnabled(v) } }
             )
@@ -129,26 +323,7 @@ fun SettingsScreen() {
             )
         }
 
-        // --------------------------------------------------------- voice
-        SectionCard(title = "Voice output speed") {
-            val speed = settings?.ttsSpeed ?: 1f
-            Slider(
-                value = speed,
-                onValueChange = { v -> scope.launch { SqlAiApp.settings.setTtsSpeed(v) } },
-                valueRange = 0.5f..2.0f
-            )
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("${"%.1f".format(speed)}x", fontSize = 12.sp)
-                OutlinedButton(onClick = { scope.launch { Speaker.speak("SQL AI is ready") } }) {
-                    Text("Test voice")
-                }
-            }
-        }
-
-        // ------------------------------------------------------ system
+        // -------------------------------------------------------- system
         SectionCard(title = "System") {
             SettingsLinkRow("Battery optimization", onClick = {
                 try {
@@ -171,6 +346,18 @@ fun SettingsScreen() {
             SettingsLinkRow("Default assistant", onClick = {
                 try {
                     context.startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
+                } catch (e: Exception) {
+                    context.startActivity(Intent(Settings.ACTION_SETTINGS))
+                }
+            })
+            SettingsLinkRow("All files access", onClick = {
+                try {
+                    context.startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                    )
                 } catch (e: Exception) {
                     context.startActivity(Intent(Settings.ACTION_SETTINGS))
                 }
@@ -198,7 +385,7 @@ fun SettingsScreen() {
                 Text(BuildConfig.VERSION_NAME, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             }
             Text(
-                "SQL AI - open-source phone-control assistant (Jarvis-AI)",
+                "SQL AI v1.1 - Agentic phone-control assistant (Jarvis-AI)",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.padding(top = 6.dp)

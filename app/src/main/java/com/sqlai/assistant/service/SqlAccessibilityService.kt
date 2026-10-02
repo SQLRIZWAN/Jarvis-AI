@@ -93,6 +93,100 @@ class SqlAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * Agent-grade screen dump: every interactive element with its on-screen
+     * bounds so the LLM can reason about positions and tap exact coordinates.
+     */
+    fun captureScreenDetailed(maxItems: Int = 60): String {
+        val root = try {
+            rootInActiveWindow
+        } catch (e: Exception) {
+            null
+        } ?: return "Screen unavailable (accessibility off)"
+
+        val pkg = root.packageName?.toString() ?: "unknown"
+        val lines = mutableListOf<String>()
+        val seen = HashSet<String>()
+        collectDetailed(root, lines, seen, 0)
+        val body = lines.take(maxItems).joinToString("\n")
+        return "FOREGROUND_APP=$pkg\n$body"
+    }
+
+    private fun collectDetailed(
+        node: AccessibilityNodeInfo,
+        out: MutableList<String>,
+        seen: HashSet<String>,
+        depth: Int
+    ) {
+        if (depth > 30 || out.size >= 300) return
+        val rect = android.graphics.Rect()
+        try {
+            node.getBoundsInScreen(rect)
+        } catch (e: Exception) {
+            // ignore
+        }
+
+        val text = node.text?.toString()?.trim().orEmpty()
+        val desc = node.contentDescription?.toString()?.trim().orEmpty()
+        val isInteractive = node.isClickable || node.isLongClickable || node.isEditable || node.isScrollable
+
+        if ((text.isNotEmpty() || desc.isNotEmpty() || isInteractive) && !rect.isEmpty) {
+            val key = "$text|$desc|${rect.left},${rect.top}"
+            if (seen.add(key)) {
+                val flags = buildString {
+                    if (node.isClickable) append("clickable ")
+                    if (node.isEditable) append("editable ")
+                    if (node.isScrollable) append("scrollable ")
+                    if (node.isCheckable) append(if (node.isChecked) "checked" else "unchecked")
+                }.trim()
+                val label = when {
+                    text.isNotEmpty() && desc.isNotEmpty() && text != desc -> "\"$text\" desc=\"$desc\""
+                    text.isNotEmpty() -> "\"$text\""
+                    else -> "desc=\"$desc\""
+                }
+                out.add("$label [${rect.left},${rect.top} ${rect.width()}x${rect.height()}] $flags")
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = try {
+                node.getChild(i)
+            } catch (e: Exception) {
+                null
+            } ?: continue
+            collectDetailed(child, out, seen, depth + 1)
+        }
+    }
+
+    // ------------------------------------------------------------ screenshot
+
+    /**
+     * Full screen capture through the accessibility API (no MediaProjection
+     * permission needed). API 30+; returns null on older devices.
+     */
+    suspend fun captureScreenshot(): android.graphics.Bitmap? {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return null
+        return kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+            try {
+                val executor = java.util.concurrent.Executor { it.run() }
+                takeScreenshot(
+                    executor,
+                    object : TakeScreenshotCallback {
+                        override fun onSuccess(info: ScreenshotResult, bitmap: android.graphics.Bitmap) {
+                            if (continuation.isActive) continuation.resume(bitmap)
+                        }
+
+                        override fun onFailure(errorCode: Int) {
+                            if (continuation.isActive) continuation.resume(null)
+                        }
+                    }
+                )
+            } catch (e: Exception) {
+                if (continuation.isActive) continuation.resume(null)
+            }
+        }
+    }
+
     // ----------------------------------------------------------- tap / gestures
 
     /** Tap exact screen coordinates. */

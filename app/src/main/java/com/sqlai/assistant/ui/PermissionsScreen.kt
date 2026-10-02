@@ -114,6 +114,15 @@ fun PermissionsScreen() {
                                     android.Manifest.permission.CAMERA
                                 )
                             )
+                        } else if (item.id == "phone") {
+                            runtimeLauncher.launch(
+                                arrayOf(
+                                    android.Manifest.permission.READ_PHONE_STATE,
+                                    android.Manifest.permission.CALL_PHONE,
+                                    android.Manifest.permission.ANSWER_PHONE_CALLS,
+                                    android.Manifest.permission.READ_CONTACTS
+                                )
+                            )
                         } else if (item.id == "storage") {
                             runtimeLauncher.launch(
                                 arrayOf(

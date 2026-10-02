@@ -42,39 +42,43 @@ object PlanParser {
                 .replace(Regex("\\s+"), " ")
                 .trim()
 
-            val actions = mutableListOf<Action>()
-            val arr: JSONArray = obj.optJSONArray("actions") ?: JSONArray()
-            for (i in 0 until arr.length()) {
-                val a = arr.optJSONObject(i) ?: continue
-                val type = a.optString("type").lowercase().trim()
-                if (type.isEmpty()) continue
-                actions.add(
-                    Action(
-                        type = type,
-                        app = a.optStringOrNull("app") ?: a.optStringOrNull("package"),
-                        text = a.optStringOrNull("text") ?: a.optStringOrNull("message"),
-                        x = a.optIntOrNull("x"),
-                        y = a.optIntOrNull("y"),
-                        x2 = a.optIntOrNull("x2"),
-                        y2 = a.optIntOrNull("y2"),
-                        durationMs = a.optIntOrNull("duration_ms") ?: a.optIntOrNull("duration"),
-                        direction = a.optStringOrNull("direction"),
-                        value = a.optIntOrNull("value"),
-                        key = a.optStringOrNull("key"),
-                        on = a.optBooleanOrNull("on"),
-                        item = a.optStringOrNull("item"),
-                        ms = a.optIntOrNull("ms")
-                    )
-                )
-            }
-            Plan(reply = reply, actions = actions)
+            Plan(reply = reply, actions = parseActions(obj))
         } catch (e: Exception) {
             Plan(reply = "Done.", actions = emptyList())
         }
     }
 
+    internal fun parseActions(obj: JSONObject): List<Action> {
+        val actions = mutableListOf<Action>()
+        val arr: JSONArray = obj.optJSONArray("actions") ?: JSONArray()
+        for (i in 0 until arr.length()) {
+            val a = arr.optJSONObject(i) ?: continue
+            val type = a.optString("type").lowercase().trim()
+            if (type.isEmpty()) continue
+            actions.add(
+                Action(
+                    type = type,
+                    app = a.optStringOrNull("app") ?: a.optStringOrNull("package"),
+                    text = a.optStringOrNull("text") ?: a.optStringOrNull("message"),
+                    x = a.optIntOrNull("x"),
+                    y = a.optIntOrNull("y"),
+                    x2 = a.optIntOrNull("x2"),
+                    y2 = a.optIntOrNull("y2"),
+                    durationMs = a.optIntOrNull("duration_ms") ?: a.optIntOrNull("duration"),
+                    direction = a.optStringOrNull("direction"),
+                    value = a.optIntOrNull("value"),
+                    key = a.optStringOrNull("key"),
+                    on = a.optBooleanOrNull("on"),
+                    item = a.optStringOrNull("item"),
+                    ms = a.optIntOrNull("ms")
+                )
+            )
+        }
+        return actions
+    }
+
     /** Pull the first balanced {...} block, tolerating markdown fences and chatter. */
-    private fun extractJsonObject(raw: String): String? {
+    internal fun extractJsonObject(raw: String): String? {
         val cleaned = raw.replace("```json", "").replace("```", "")
         val start = cleaned.indexOf('{')
         if (start < 0) return null
@@ -102,12 +106,12 @@ object PlanParser {
         return null
     }
 
-    private fun JSONObject.optStringOrNull(key: String): String? =
+    internal fun JSONObject.optStringOrNull(key: String): String? =
         if (has(key) && !isNull(key)) optString(key).takeIf { it.isNotBlank() } else null
 
-    private fun JSONObject.optIntOrNull(key: String): Int? =
+    internal fun JSONObject.optIntOrNull(key: String): Int? =
         if (has(key) && !isNull(key)) optInt(key) else null
 
-    private fun JSONObject.optBooleanOrNull(key: String): Boolean? =
+    internal fun JSONObject.optBooleanOrNull(key: String): Boolean? =
         if (has(key) && !isNull(key)) optBoolean(key) else null
 }

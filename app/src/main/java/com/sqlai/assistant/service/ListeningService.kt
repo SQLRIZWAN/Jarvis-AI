@@ -97,6 +97,7 @@ class ListeningService : Service() {
     @Volatile private var awaitingCommand = false
     @Volatile private var awaitingAttempts = 0
     @Volatile private var cachedWakeWord = "sql"
+    @Volatile private var cachedLanguageTag = "en-IN"
 
     override fun onCreate() {
         super.onCreate()
@@ -224,6 +225,7 @@ class ListeningService : Service() {
         settingsJob = scope.launch {
             SqlAiApp.settings.settings.collect { settings ->
                 cachedWakeWord = settings.wakeWord.ifBlank { "sql" }
+                cachedLanguageTag = settings.language.sttTag
                 val shouldRun = settings.assistantEnabled && settings.listenServiceEnabled
                 if (shouldRun && !running) {
                     ensureRunning()
@@ -304,6 +306,7 @@ class ListeningService : Service() {
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
                 putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, cachedLanguageTag)
             }
             current.setRecognitionListener(recognitionListener)
             current.startListening(intent)

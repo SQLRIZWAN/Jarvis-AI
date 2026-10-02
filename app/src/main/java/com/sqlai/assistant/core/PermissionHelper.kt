@@ -7,6 +7,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.content.ContextCompat
@@ -60,6 +62,35 @@ object PermissionHelper {
     fun has(context: Context, permission: String): Boolean =
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 
+    // ------------------------------------------------------------ storage
+
+    /**
+     * Storage access that works on every Android version:
+     *  - Android 13+ : READ_MEDIA_IMAGES / AUDIO / VIDEO
+     *  - Android 10-12: READ_EXTERNAL_STORAGE (scoped fallback)
+     *  - Optional full file access via MANAGE_EXTERNAL_STORAGE
+     */
+    fun hasStorage(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            has(context, Manifest.permission.READ_MEDIA_IMAGES) ||
+                has(context, Manifest.permission.READ_MEDIA_AUDIO) ||
+                has(context, Manifest.permission.READ_MEDIA_VIDEO)
+        } else {
+            has(context, Manifest.permission.READ_EXTERNAL_STORAGE) ||
+                Environment.isExternalStorageManager()
+        }
+    }
+
+    fun hasManageAllFiles(): Boolean = Environment.isExternalStorageManager()
+
+    // ------------------------------------------------------------- phone
+
+    fun hasPhoneAccess(context: Context): Boolean =
+        has(context, Manifest.permission.READ_PHONE_STATE) &&
+            has(context, Manifest.permission.CALL_PHONE)
+
+    // -------------------------------------------------------- statuses
+
     fun statuses(context: Context): List<PermissionStatus> = listOf(
         PermissionStatus(
             id = "mic",
@@ -88,7 +119,7 @@ object PermissionHelper {
         PermissionStatus(
             id = "notification_listener",
             title = "Notification Access",
-            description = "Read and reply to your notifications",
+            description = "Read messages + auto-reply, WhatsApp call detection",
             granted = isNotificationAccessOn(context)
         ),
         PermissionStatus(
@@ -104,17 +135,27 @@ object PermissionHelper {
             granted = isIgnoringBattery(context)
         ),
         PermissionStatus(
+            id = "phone",
+            title = "Phone & Calls",
+            description = "Auto-receive calls, speak live on call, place calls",
+            granted = hasPhoneAccess(context) &&
+                has(context, Manifest.permission.ANSWER_PHONE_CALLS)
+        ),
+        PermissionStatus(
             id = "contacts",
-            title = "Contacts & Phone",
+            title = "Contacts",
             description = "Call or message people by name",
-            granted = has(context, Manifest.permission.READ_CONTACTS) &&
-                has(context, Manifest.permission.READ_PHONE_STATE)
+            granted = has(context, Manifest.permission.READ_CONTACTS)
         ),
         PermissionStatus(
             id = "storage",
-            title = "Media / Storage",
-            description = "Open, share and control your media",
-            granted = has(context, Manifest.permission.READ_MEDIA_IMAGES)
+            title = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                "Photos, Video & Audio (Android 13+)"
+            else "Storage (All files access)",
+            description = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                "READ_MEDIA_IMAGES / AUDIO / VIDEO access"
+            else "Legacy storage + optional All Files permission",
+            granted = hasStorage(context)
         ),
         PermissionStatus(
             id = "assistant",
@@ -125,34 +166,47 @@ object PermissionHelper {
     )
 
     fun isDefaultAssistant(context: Context): Boolean {
-        // The VoiceInteraction framework resolves the current assistant package.
         return try {
             val intent = Intent("android.settings.VOICE_INPUT_SETTINGS")
-            // Cannot query reliably without rolemanager; treat service-enabled as proxy.
-            isAccessibilityEnabled(context) && intent.resolveActivity(context.packageManager) != null &&
-                has(context, Manifest.permission.RECORD_AUDIO) && isVoiceInteractionReady()
+            isAccessibilityEnabled(context) &&
+                intent.resolveActivity(context.packageName) != null &&
+                has(context, Manifest.permission.RECORD_AUDIO)
         } catch (e: Exception) {
             false
         }
     }
 
-    private fun isVoiceInteractionReady(): Boolean = true
+    // ------------------------------------------------- runtime requests
 
-    fun runtimePermissions(): Array<String> = arrayOf(
-        Manifest.permission.RECORD_AUDIO,
-        Manifest.permission.POST_NOTIFICATIONS,
-        Manifest.permission.READ_CONTACTS,
-        Manifest.permission.READ_PHONE_STATE,
-        Manifest.permission.CAMERA,
-        Manifest.permission.READ_MEDIA_IMAGES,
-        Manifest.permission.READ_MEDIA_AUDIO,
-        Manifest.permission.READ_MEDIA_VIDEO
-    )
+    /** Version-correct runtime permission set (fixes Android 13 storage denials). */
+    fun runtimePermissions(): Array<String> {
+        val list = mutableListOf(
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.POST_NOTIFICATIONS,
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.CALL_PHONE,
+            Manifest.permission.CAMERA,
+            Manifest.permission.ANSWER_PHONE_CALLS
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            list += Manifest.permission.READ_MEDIA_IMAGES
+            list += Manifest.permission.READ_MEDIA_AUDIO
+            list += Manifest.permission.READ_MEDIA_VIDEO
+        } else {
+            list += Manifest.permission.READ_EXTERNAL_STORAGE
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                list += Manifest.permission.WRITE_EXTERNAL_STORAGE
+            }
+        }
+        return list.toTypedArray()
+    }
 
     /** Launch the correct system screen for a permission card id. */
     fun open(context: Context, id: String) {
         val intent: Intent? = when (id) {
-            "mic", "notifications_perm", "contacts", "storage" -> null // runtime request
+            "mic", "notifications_perm", "contacts", "storage" -> storageOrRuntimeIntent(context, id)
+            "phone" -> null // runtime
             "accessibility" -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
             "overlay" -> Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -178,6 +232,17 @@ object PermissionHelper {
                 Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         }
+    }
+
+    private fun storageOrRuntimeIntent(context: Context, id: String): Intent? {
+        if (id != "storage") return null
+        // Android 11+ fallback page for "All files access" when media perms are not enough.
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasManageAllFiles()) {
+            Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:${context.packageName}")
+            )
+        } else null
     }
 
     fun requestRuntime(activity: Activity) {

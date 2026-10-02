@@ -46,6 +46,8 @@ import androidx.compose.ui.unit.sp
 import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.ai.AiClient
 import com.sqlai.assistant.ai.AiException
+import com.sqlai.assistant.ai.GeminiModel
+import com.sqlai.assistant.ai.GeminiModelFetcher
 import com.sqlai.assistant.core.AiProvider
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
@@ -67,6 +69,34 @@ fun ApiConfigScreen() {
     var providerMenuOpen by remember { mutableStateOf(false) }
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
+
+    // ---- Gemini dynamic model list ----
+    var geminiModels by remember { mutableStateOf<List<GeminiModel>>(emptyList()) }
+    var fetchingModels by remember { mutableStateOf(false) }
+    var modelFetchError by remember { mutableStateOf<String?>(null) }
+    var modelMenuOpen by remember { mutableStateOf(false) }
+    var autoFetchDone by remember { mutableStateOf(false) }
+
+    val currentProviderValue = settings?.provider ?: AiProvider.GROQ
+
+    LaunchedEffect(currentProviderValue, settings?.apiKey) {
+        val key = settings?.apiKey.orEmpty()
+        if (currentProviderValue == AiProvider.GEMINI &&
+            key.length >= 20 && !autoFetchDone && geminiModels.isEmpty()
+        ) {
+            autoFetchDone = true
+            fetchingModels = true
+            try {
+                geminiModels = GeminiModelFetcher.fetch(key)
+                modelFetchError = null
+                LogBus.log("Loaded ${geminiModels.size} Gemini models", LogLevel.SUCCESS)
+            } catch (e: Exception) {
+                modelFetchError = e.message
+                LogBus.log("Gemini model fetch failed: ${e.message}", LogLevel.WARN)
+            }
+            fetchingModels = false
+        }
+    }
 
     LaunchedEffect(settings) {
         val s = settings ?: return@LaunchedEffect
@@ -168,6 +198,104 @@ fun ApiConfigScreen() {
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+
+            // ---------------- Gemini: live model dropdown ----------------
+            if (currentProviderValue == AiProvider.GEMINI) {
+                Spacer(Modifier.height(12.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        onClick = {
+                            fetchingModels = true
+                            scope.launch {
+                                try {
+                                    geminiModels = GeminiModelFetcher.fetch(apiKey)
+                                    modelFetchError = null
+                                    LogBus.log(
+                                        "Loaded ${geminiModels.size} Gemini models",
+                                        LogLevel.SUCCESS
+                                    )
+                                } catch (e: Exception) {
+                                    modelFetchError = e.message
+                                    LogBus.log("Model fetch failed: ${e.message}", LogLevel.ERROR)
+                                }
+                                fetchingModels = false
+                            }
+                        },
+                        enabled = !fetchingModels && apiKey.isNotBlank()
+                    ) {
+                        Text(
+                            if (geminiModels.isEmpty()) "Fetch available models"
+                            else "Refresh models (${geminiModels.size})"
+                        )
+                    }
+                    if (fetchingModels) {
+                        Spacer(Modifier.width(10.dp))
+                        CircularProgressIndicator(
+                            Modifier
+                                .width(16.dp)
+                                .height(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                    }
+                }
+
+                if (geminiModels.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    ExposedDropdownMenuBox(
+                        expanded = modelMenuOpen,
+                        onExpandedChange = { modelMenuOpen = it }
+                    ) {
+                        OutlinedTextField(
+                            value = geminiModels.firstOrNull { it.id == model }?.displayName
+                                ?: model,
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("Select Gemini model") },
+                            trailingIcon = {
+                                ExposedDropdownMenuDefaults.TrailingIcon(expanded = modelMenuOpen)
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .menuAnchor()
+                        )
+                        ExposedDropdownMenu(
+                            expanded = modelMenuOpen,
+                            onDismissRequest = { modelMenuOpen = false }
+                        ) {
+                            geminiModels.forEach { geminiModel ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(geminiModel.displayName, fontSize = 14.sp)
+                                            Text(
+                                                geminiModel.id,
+                                                fontSize = 10.sp,
+                                                color = MaterialTheme.colorScheme.outline
+                                            )
+                                        }
+                                    },
+                                    onClick = {
+                                        modelMenuOpen = false
+                                        model = geminiModel.id
+                                        scope.launch { SqlAiApp.settings.setModel(geminiModel.id) }
+                                        LogBus.log("Gemini model: ${geminiModel.id}", LogLevel.SUCCESS)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                modelFetchError?.let { message ->
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        message,
+                        fontSize = 11.sp,
+                        color = SqlError
+                    )
+                }
+            }
 
             Spacer(Modifier.height(12.dp))
 

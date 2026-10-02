@@ -4,6 +4,10 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -39,6 +43,60 @@ class SqlNotificationListener : NotificationListenerService() {
         synchronized(lock) {
             recent.addLast(line)
             while (recent.size > MAX_KEPT) recent.removeFirst()
+        }
+
+        if (sbn.packageName == context.packageName) return
+
+        // WhatsApp / messenger auto-reply
+        com.sqlai.assistant.engine.AutoReplyEngine.onMessage(
+            pkg = sbn.packageName,
+            title = title,
+            message = text
+        )
+
+        // WhatsApp incoming call -> tap Answer through accessibility
+        handlePossibleCall(sbn, notification, title)
+    }
+
+    private fun handlePossibleCall(
+        sbn: StatusBarNotification,
+        notification: android.app.Notification,
+        title: String
+    ) {
+        val pkg = sbn.packageName
+        val isCallCategory = notification.category == android.app.Notification.CATEGORY_CALL
+        val looksLikeCall = isCallCategory ||
+            title.contains("Incoming call", ignoreCase = true) ||
+            title.contains("incoming voice", ignoreCase = true) ||
+            title.contains("incoming video", ignoreCase = true) ||
+            title.contains("is calling", ignoreCase = true)
+        if (!looksLikeCall) return
+
+        val isMessengerCall = pkg == "com.whatsapp" || pkg == "com.whatsapp.w4b" ||
+            pkg == "org.telegram.messenger"
+        if (!isMessengerCall) return
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val settings = com.sqlai.assistant.SqlAiApp.settings.settings.first()
+                if (!settings.callAssistantEnabled) return@launch
+                LogBus.log("Messenger call detected in $pkg - attempting auto-answer", LogLevel.SUCCESS)
+                val pkgResolved = com.sqlai.assistant.device.DeviceController.resolvePackage(pkg)
+                if (pkgResolved == null) return@launch
+                com.sqlai.assistant.device.DeviceController.launchPackage(pkgResolved)
+                delay(2200)
+                val svc = instance ?: return@launch
+                val answered = svc.clickText("Answer") ||
+                    svc.clickText("Accept") ||
+                    svc.clickText("answer") ||
+                    svc.clickText("जवाब दें")
+                LogBus.log(
+                    if (answered) "Messenger call answered" else "Answer button not found",
+                    if (answered) LogLevel.SUCCESS else LogLevel.WARN
+                )
+            } catch (e: Exception) {
+                LogBus.log("Messenger call answer failed: ${e.message}", LogLevel.ERROR)
+            }
         }
     }
 

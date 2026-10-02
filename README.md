@@ -20,17 +20,36 @@ taps, swipes and typing for you.
 
 ## Features
 
+- **Autonomous Agentic Loop (v1.1)** - `SQLAgentEngine` runs a
+  **Think -> Act -> Verify -> Retry** ReAct loop. The agent re-reads the live
+  screen after every action and keeps re-planning (up to 20 configurable steps)
+  until the task is verified complete - e.g. *"open Instagram, like my latest reel"*.
+- **Screen vision** - accessibility screenshots (API 30+, no MediaProjection
+  permission needed) are sent to multimodal models (Gemini / vision models) so
+  the AI can literally see the UI. Element dump includes bounds `[x,y WxH]`,
+  text, content-description and clickable flags for precise coordinate taps.
+- **Live call assistant (v1.1)** - InCallService auto-answers incoming calls,
+  speaks through the call audio stream (male/female voice) and listens for the
+  caller's reply (SpeechRecognizer). Also taps **Answer** on WhatsApp calls.
+- **WhatsApp/SMS auto-reply (v1.1)** - NotificationListener triggers an AI
+  generated reply (OTP-safe, rate-limited) that is typed and sent through
+  accessibility.
+- **Dynamic Gemini model selector** - the model dropdown is fetched live from
+  `generativelanguage.googleapis.com/v1beta/models` for your key.
 - **Default digital assistant** - VoiceInteractionService + VoiceInteractionSession,
   summonable with long-press HOME / power button.
 - **24/7 wake-word listening** - foreground `microphone` service keeps a
   SpeechRecognizer loop alive for the wake word `SQL` (configurable).
 - **Full phone control** - AccessibilityService that can:
-  - read the live screen hierarchy (text + buttons + view ids),
+  - read the live screen hierarchy (text + buttons + bounds),
   - tap any element by text or coordinates, swipe, scroll,
   - type into focused inputs (clipboard fallback),
   - open/close any installed app, press back/home/recents,
+  - place calls (by number or contact name), answer/hang-up,
   - volume, brightness, flashlight, Wi-Fi/Bluetooth panels, system settings,
   - read your notifications (NotificationListenerService).
+- **Voice customization (v1.1)** - Male/Female voice, pitch, speed, and
+  Hindi / English / Hinglish for both speech output and wake-word recognition.
 - **Free LLM providers** - Groq, Google Gemini, OpenRouter, Together AI,
   Hugging Face, DeepSeek and fully local Ollama (OpenAI-compatible).
 - **Dashboard** - master toggle, live service health, voice-activity orb,

@@ -1,5 +1,6 @@
 package com.sqlai.assistant.ai
 
+import android.util.Base64
 import com.sqlai.assistant.core.AiProvider
 import com.sqlai.assistant.core.AppSettings
 import kotlinx.coroutines.Dispatchers
@@ -19,10 +20,11 @@ class AiException(message: String) : Exception(message)
 /**
  * Unified chat handler for every supported provider.
  * GEMINI uses its native REST dialect, all other providers are OpenAI-compatible.
+ * Supports optional screenshot (vision) attachments for multimodal models.
  */
 object AiClient {
 
-    private const val MAX_HISTORY = 12
+    private const val MAX_HISTORY = 14
 
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -33,15 +35,36 @@ object AiClient {
     suspend fun complete(
         settings: AppSettings,
         screenContext: String?,
-        history: List<ChatMessage>
+        history: List<ChatMessage>,
+        imageJpeg: ByteArray? = null,
+        systemPromptOverride: String? = null
     ): String = withContext(Dispatchers.IO) {
         if (settings.apiKey.isBlank() && settings.provider != AiProvider.OLLAMA) {
             throw AiException("No API key set. Open the API tab and paste your ${settings.provider.label} key.")
         }
 
+        try {
+            execute(settings, screenContext, history, imageJpeg, systemPromptOverride)
+        } catch (e: Exception) {
+            // Model without image support - retry once with text only.
+            if (imageJpeg != null) {
+                execute(settings, screenContext, history, null, systemPromptOverride)
+            } else {
+                throw e
+            }
+        }
+    }
+
+    private fun execute(
+        settings: AppSettings,
+        screenContext: String?,
+        history: List<ChatMessage>,
+        imageJpeg: ByteArray?,
+        systemPromptOverride: String?
+    ): String {
         val request = when (settings.provider) {
-            AiProvider.GEMINI -> geminiRequest(settings, screenContext, history)
-            else -> openAiRequest(settings, screenContext, history)
+            AiProvider.GEMINI -> geminiRequest(settings, screenContext, history, imageJpeg, systemPromptOverride)
+            else -> openAiRequest(settings, screenContext, history, imageJpeg, systemPromptOverride)
         }
 
         http.newCall(request).execute().use { response ->
@@ -49,7 +72,7 @@ object AiClient {
             if (!response.isSuccessful) {
                 throw AiException("HTTP ${response.code}: ${body.take(240)}")
             }
-            extractText(settings.provider, body)
+            return extractText(settings.provider, body)
         }
     }
 
@@ -59,26 +82,55 @@ object AiClient {
 
     // ---------------------------------------------------------------- helpers
 
-    private fun systemContent(settings: AppSettings, screenContext: String?): String {
-        val sb = StringBuilder(settings.systemPrompt)
+    private fun systemContent(
+        settings: AppSettings,
+        screenContext: String?,
+        systemPromptOverride: String?
+    ): String {
+        val sb = StringBuilder(systemPromptOverride ?: settings.systemPrompt)
+        sb.append("\n\n").append(settings.languageInstruction())
         if (!screenContext.isNullOrBlank()) {
             sb.append("\n\nCURRENT SCREEN CONTEXT (live):\n").append(screenContext)
         }
         return sb.toString()
     }
 
+    private fun imagePartOpenAi(imageJpeg: ByteArray): JSONObject {
+        val encoded = Base64.encodeToString(imageJpeg, Base64.NO_WRAP)
+        return JSONObject()
+            .put("type", "image_url")
+            .put(
+                "image_url",
+                JSONObject().put("url", "data:image/jpeg;base64,$encoded")
+            )
+    }
+
     private fun openAiRequest(
         settings: AppSettings,
         screenContext: String?,
-        history: List<ChatMessage>
+        history: List<ChatMessage>,
+        imageJpeg: ByteArray?,
+        systemPromptOverride: String?
     ): Request {
         val messages = JSONArray()
         messages.put(
-            JSONObject().put("role", "system").put("content", systemContent(settings, screenContext))
+            JSONObject().put("role", "system")
+                .put("content", systemContent(settings, screenContext, systemPromptOverride))
         )
-        history.takeLast(MAX_HISTORY).forEach { msg ->
+
+        val lastUserIndex = history.indexOfLast { it.role != "assistant" }
+        history.takeLast(MAX_HISTORY).forEachIndexed { offset, msg ->
             val role = if (msg.role == "assistant") "assistant" else "user"
-            messages.put(JSONObject().put("role", role).put("content", msg.content))
+            val absoluteIndex = history.size - minOf(MAX_HISTORY, history.size) + offset
+            val isLastUser = absoluteIndex == lastUserIndex
+            if (isLastUser && imageJpeg != null) {
+                val content = JSONArray()
+                content.put(JSONObject().put("type", "text").put("text", msg.content))
+                content.put(imagePartOpenAi(imageJpeg))
+                messages.put(JSONObject().put("role", role).put("content", content))
+            } else {
+                messages.put(JSONObject().put("role", role).put("content", msg.content))
+            }
         }
 
         val payload = JSONObject()
@@ -106,15 +158,30 @@ object AiClient {
     private fun geminiRequest(
         settings: AppSettings,
         screenContext: String?,
-        history: List<ChatMessage>
+        history: List<ChatMessage>,
+        imageJpeg: ByteArray?,
+        systemPromptOverride: String?
     ): Request {
         val contents = JSONArray()
-        history.takeLast(MAX_HISTORY).forEach { msg ->
+        val lastUserIndex = history.indexOfLast { it.role != "assistant" }
+        val trimmed = history.takeLast(MAX_HISTORY)
+        trimmed.forEachIndexed { offset, msg ->
             val role = if (msg.role == "assistant") "model" else "user"
+            val absoluteIndex = history.size - trimmed.size + offset
+            val isLastUser = absoluteIndex == lastUserIndex
+            val parts = JSONArray()
+            parts.put(JSONObject().put("text", msg.content))
+            if (isLastUser && imageJpeg != null) {
+                parts.put(
+                    JSONObject()
+                        .put("mime_type", "image/jpeg")
+                        .put("data", Base64.encodeToString(imageJpeg, Base64.NO_WRAP))
+                )
+            }
             contents.put(
                 JSONObject()
                     .put("role", role)
-                    .put("parts", JSONArray().put(JSONObject().put("text", msg.content)))
+                    .put("parts", parts)
             )
         }
         if (contents.length() == 0) {
@@ -128,7 +195,15 @@ object AiClient {
         val payload = JSONObject()
             .put(
                 "systemInstruction",
-                JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemContent(settings, screenContext))))
+                JSONObject().put(
+                    "parts",
+                    JSONArray().put(
+                        JSONObject().put(
+                            "text",
+                            systemContent(settings, screenContext, systemPromptOverride)
+                        )
+                    )
+                )
             )
             .put("contents", contents)
             .put(

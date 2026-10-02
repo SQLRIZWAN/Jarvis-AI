@@ -150,8 +150,101 @@ object DeviceController {
 
             "wait" -> delay((action.ms ?: 500).coerceIn(0, 15000).toLong())
 
+            "wait_for" -> {
+                val target = action.text.orEmpty()
+                val timeout = (action.ms ?: 5000).coerceIn(500, 20000).toLong()
+                val found = waitForText(target, timeout)
+                LogBus.log(
+                    if (found) "\"$target\" appeared" else "Timeout waiting for \"$target\"",
+                    if (found) LogLevel.SUCCESS else LogLevel.WARN
+                )
+            }
+
+            "call" -> placeCall(action.text ?: action.app.orEmpty())
+
+            "end_call" -> endCall()
+
+            "answer_call" -> answerCall()
+
             else -> LogBus.log("Unknown action type: ${action.type}", LogLevel.WARN)
         }
+    }
+
+    /** Poll the screen until [text] shows up or the timeout expires. */
+    private suspend fun waitForText(text: String, timeoutMs: Long): Boolean {
+        if (text.isBlank()) return false
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val dump = SqlAccessibilityService.instance?.captureScreenText(80).orEmpty()
+            if (dump.contains(text, ignoreCase = true)) return true
+            delay(600)
+        }
+        return false
+    }
+
+    private fun placeCall(target: String) {
+        if (target.isBlank()) {
+            LogBus.log("No number/name given for call", LogLevel.WARN)
+            return
+        }
+        val number = target.filter { it.isDigit() || it == '+' || it == '*' || it == '#' }
+        val uri = if (number.length >= 3) {
+            android.net.Uri.parse("tel:$number")
+        } else {
+            // Resolve a contact by display name.
+            val contactUri = queryContactNumber(target) ?: run {
+                LogBus.log("Contact not found: $target", LogLevel.WARN)
+                return
+            }
+            android.net.Uri.parse("tel:$contactUri")
+        }
+        try {
+            app.startActivity(
+                Intent(Intent.ACTION_CALL, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            LogBus.log("Dialing $target", LogLevel.SUCCESS)
+        } catch (e: Exception) {
+            LogBus.log("Call failed: ${e.message}", LogLevel.ERROR)
+        }
+    }
+
+    private fun queryContactNumber(name: String): String? {
+        return try {
+            val projection = arrayOf(
+                android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER,
+                android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+            )
+            val cursor = app.contentResolver.query(
+                android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                projection,
+                null, null, null
+            )
+            cursor?.use {
+                val nameIdx = it.getColumnIndexOrThrow(
+                    android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+                )
+                val numIdx = it.getColumnIndexOrThrow(
+                    android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER
+                )
+                while (it.moveToNext()) {
+                    val display = it.getString(nameIdx) ?: ""
+                    if (display.contains(name, ignoreCase = true)) {
+                        return it.getString(numIdx)?.replace(Regex("[^0-9+]"), "")
+                    }
+                }
+            }
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun answerCall() {
+        com.sqlai.assistant.service.CallBridge.answer(app)
+    }
+
+    private fun endCall() {
+        com.sqlai.assistant.service.CallBridge.endCall(app)
     }
 
     // ------------------------------------------------------------- app control
