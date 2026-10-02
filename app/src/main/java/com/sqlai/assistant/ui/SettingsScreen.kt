@@ -54,7 +54,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun SettingsScreen() {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope(context = AppCrashHandler.coroutineHandler)
+    val scope = AppCrashHandler.safeScope(rememberCoroutineScope())
     val settings by SqlAiApp.settings.settings.collectAsState(initial = null)
 
     var wakeWord by remember { mutableStateOf("sql") }

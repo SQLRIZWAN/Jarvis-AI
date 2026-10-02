@@ -59,7 +59,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ApiConfigScreen() {
-    val scope = rememberCoroutineScope(context = AppCrashHandler.coroutineHandler)
+    val scope = AppCrashHandler.safeScope(rememberCoroutineScope())
     val settings by SqlAiApp.settings.settings.collectAsState(initial = null)
 
     var apiKey by remember { mutableStateOf("") }

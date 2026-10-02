@@ -97,7 +97,7 @@ fun DashboardScreen() {
 
     var manualCommand by remember { mutableStateOf("") }
     val logListState = rememberLazyListState()
-    val scope = rememberCoroutineScope(context = AppCrashHandler.coroutineHandler)
+    val scope = AppCrashHandler.safeScope(rememberCoroutineScope())
 
     LaunchedEffect(logs.size) {
         if (logs.isNotEmpty()) logListState.animateScrollToItem(logs.size - 1)

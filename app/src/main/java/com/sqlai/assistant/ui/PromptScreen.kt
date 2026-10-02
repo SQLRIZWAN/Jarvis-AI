@@ -50,7 +50,7 @@ import kotlinx.coroutines.launch
  */
 @Composable
 fun PromptScreen() {
-    val scope = rememberCoroutineScope(context = AppCrashHandler.coroutineHandler)
+    val scope = AppCrashHandler.safeScope(rememberCoroutineScope())
     val settings by SqlAiApp.settings.settings.collectAsState(initial = null)
 
     var userName by remember { mutableStateOf("") }

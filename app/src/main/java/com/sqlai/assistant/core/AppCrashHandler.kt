@@ -3,6 +3,7 @@ package com.sqlai.assistant.core
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -62,6 +63,10 @@ object AppCrashHandler {
     } catch (t: Throwable) {
         null
     }
+
+    /** Derives a scope (e.g. rememberCoroutineScope) that logs failures instead of crashing. */
+    fun safeScope(base: CoroutineScope): CoroutineScope =
+        CoroutineScope(base.coroutineContext + coroutineHandler)
 
     /** Shared handler: log scope failures instead of killing the app. */
     val coroutineHandler: CoroutineExceptionHandler =
