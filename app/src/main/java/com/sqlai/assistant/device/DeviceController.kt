@@ -20,6 +20,7 @@ import com.sqlai.assistant.service.WhatsAppCallAutomationHandler
 import com.sqlai.assistant.service.SqlNotificationListener
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Executes the AI's action plan: launches apps, drives the screen through the
@@ -34,16 +35,19 @@ object DeviceController {
             LogBus.log("No device actions needed", LogLevel.INFO)
             return
         }
-        actions.forEachIndexed { index, action ->
-            try {
-                LogBus.log("Action ${index + 1}/${actions.size}: ${describe(action)}")
-                perform(action)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                // 5s step timeout / agent stop - abort the WHOLE batch at once,
-                // never swallow the cancel (it would keep firing actions).
-                throw e
-            } catch (e: Exception) {
-                LogBus.log("Action failed (${action.type}): ${e.message}", LogLevel.ERROR)
+        // v7: one UI mutation at a time across ALL agents (ek tap ek mutex).
+        com.sqlai.assistant.agent.AgentOS.uiMutex.withLock {
+            actions.forEachIndexed { index, action ->
+                try {
+                    LogBus.log("Action ${index + 1}/${actions.size}: ${describe(action)}")
+                    perform(action)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // 5s step timeout / agent stop - abort the WHOLE batch at once,
+                    // never swallow the cancel (it would keep firing actions).
+                    throw e
+                } catch (e: Exception) {
+                    LogBus.log("Action failed (${action.type}): ${e.message}", LogLevel.ERROR)
+                }
             }
         }
     }

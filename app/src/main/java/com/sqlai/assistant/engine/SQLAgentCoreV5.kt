@@ -48,8 +48,8 @@ import java.io.ByteArrayOutputStream
  *            Gemini Vision can emit exact pixel tap {x,y} targets that are
  *            dispatched through [CoordinateGestureExecutor].
  *
- *   INTERRUPT: [isPaused] is polled every iteration - the voice bridge can
- *            pause execution mid-task, answer the user, then resume.
+ *   INTERRUPT: [isPaused] stays false in v7 - user speech is answered by
+ *            the ConversationAgent in PARALLEL, the loop never freezes.
  */
 object SQLAgentCoreV5 {
 

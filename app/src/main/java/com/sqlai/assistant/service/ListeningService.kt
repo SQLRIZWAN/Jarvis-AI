@@ -25,6 +25,7 @@ import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.core.StateBus
 import com.sqlai.assistant.ai.GeminiLiveAudioEngine
+import com.sqlai.assistant.agent.AgentOS
 import com.sqlai.assistant.engine.AssistantEngine
 import com.sqlai.assistant.engine.OverlayManager
 import com.sqlai.assistant.engine.Speaker
@@ -139,9 +140,9 @@ class ListeningService : Service() {
                 if (text.isNotBlank()) {
                     StateBus.setCommand(text)
                     LogBus.log("Assist command: \"$text\"")
-                    // Loop B (task executor) runs in parallel - Loop A (voice
-                    // bridge) re-arms immediately instead of blocking here.
-                    AssistantEngine.execute(text, "assist")
+                    // v7: AgentOS routes it - chat answers instantly while
+                    // Loop B keeps running, new tasks queue instead of drop.
+                    AgentOS.dispatchText(text, "assist")
                     scheduleNext(900)
                 }
                 return START_NOT_STICKY

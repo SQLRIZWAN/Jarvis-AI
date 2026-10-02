@@ -56,7 +56,6 @@ object SQLAgentEngineV4 {
     private val runMutex = Mutex()
 
     @Volatile private var cancelRequested = false
-    @Volatile private var pauseRequested = false
 
     private val CANCEL_WORDS = setOf(
         "stop", "cancel", "stop it", "cancel it", "ruko", "ruk jao",
@@ -70,25 +69,6 @@ object SQLAgentEngineV4 {
     }
 
     fun isRunning(): Boolean = _taskState.value.running
-
-    /**
-     * Interrupt: freeze Loop B at its next step boundary so the voice bridge
-     * can answer the user, then [resume] continues the task exactly where it
-     * stopped. Non-blocking - the executor polls this between steps.
-     */
-    fun pause() {
-        if (!_taskState.value.running) return
-        pauseRequested = true
-        LogBus.log("Agent paused for user interruption", LogLevel.WARN)
-    }
-
-    fun resume() {
-        if (!pauseRequested) return
-        pauseRequested = false
-        LogBus.log("Agent resumed after interruption", LogLevel.SUCCESS)
-    }
-
-    fun isPaused(): Boolean = pauseRequested
 
     /** Request a graceful stop - the executor exits after its current step. */
     fun cancel() {
@@ -110,7 +90,6 @@ object SQLAgentEngineV4 {
         }
         try {
             cancelRequested = false
-            pauseRequested = false
             _taskState.value = TaskState(running = true, task = task, startedAt = System.currentTimeMillis())
 
             coroutineScope {
@@ -129,8 +108,7 @@ object SQLAgentEngineV4 {
                         task = task,
                         source = source,
                         announce = { line -> progress.tryEmit(line) },
-                        shouldStop = { cancelRequested },
-                        isPaused = { pauseRequested }
+                        shouldStop = { cancelRequested }
                     )
                 }
 
