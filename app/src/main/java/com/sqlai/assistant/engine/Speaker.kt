@@ -423,7 +423,8 @@ object Speaker {
 
     fun shutdown() {
         try {
-            speechQueue.close()
+            signal.close()
+            synchronized(queueLock) { pendingLines.clear() }
         } catch (e: Exception) {
             // Ignore.
         }
