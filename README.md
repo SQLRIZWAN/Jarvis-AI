@@ -9,7 +9,7 @@ taps, swipes and typing for you.
 | | |
 |---|---|
 | Repository | `Jarvis-AI` |
-| App name | **SQL AI v5.3 Ultimate Agent** (dynamic, version-stamped) |
+| App name | **SQL AI v5.4 Ultimate Agent** (dynamic, version-stamped) |
 | Package | `com.sqlai.assistant` |
 | Language | Kotlin + Jetpack Compose |
 | Min SDK | 26 (Android 8.0) |
@@ -18,6 +18,27 @@ taps, swipes and typing for you.
 
 ---
 
+## What's new in v5.4
+
+On-device feedback round 2 (v5.3): call "baithak" jaata tha, voice notes
+khaali aate the, agent peeche soch raha tha. Fixes:
+
+- **Call no longer babysat** - blank-message path me MODE_IN_COMMUNICATION
+  + speakerphone LEAK hota tha (endSession hi nahi tha) -> uske baad phone
+  ka audio, STT, voice notes sab kharab. Ab endSession hamesha (mode reset,
+  queue gate open), reply windows 10-15s only - agent control turant wapas.
+  WhatsApp call apne aap chalta rehta hai.
+- **Voice notes ab khaali nahi** - record se pehle: audio mode reset +
+  leftover duplex mic stopped (concurrent capture = WhatsApp recorder OS
+  level mutED tha -> khaali note), deterministic direct TTS USAGE_MEDIA
+  during hold (Gemini route latency/fail -> silence tha), queue gate taaki
+  aur koi line TTS ko kaat na sake, TTS start latency ka lead-in + tail.
+- **Agent ab fresh dekhta hai** - 800ms frame cache post-action invalidate
+  (pre-action pixels mil rahe the -> "peeche soch raha tha"), vision 1280px
+  downscale (chhota upload = tez jawab), prompt rule: act on current screen,
+  no re-reading, forward motion only.
+
+---
 ## What's new in v5.3
 
 User-reported v5.2 failures: crash mid-task, call sunta-bolta nahi, voice
