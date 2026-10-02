@@ -160,7 +160,7 @@ object GeminiLiveAudioEngine {
     fun startMic() {
         val context = try { SqlAiApp.instance } catch (e: Exception) { null } ?: return
         if (!AudioManagerController.canStartRecording(context, AudioManagerController.MicOwner.GEMINI_LIVE)) {
-            LogBus.log("Mic busy (${AudioManagerController.micOwner.value.name}) - live input paused", LogLevel.WARN)
+            LogBus.log("duplex unavailable (mic busy: ${AudioManagerController.micOwner.value.name}) - live input paused", LogLevel.WARN)
             return
         }
         val generation = micGeneration.incrementAndGet()
@@ -616,7 +616,7 @@ object GeminiLiveAudioEngine {
             // Give up cleanly instead of re-opening forever (freeze fix).
             micRunning.set(false)
             AudioManagerController.releaseMic(AudioManagerController.MicOwner.GEMINI_LIVE)
-            LogBus.log("Mic could not be opened - live input stopped", LogLevel.WARN)
+            LogBus.log("duplex unavailable (mic could not be opened) - one-way only", LogLevel.WARN)
             return
         }
         try {

@@ -184,9 +184,15 @@ object DeviceController {
             "wa_call" -> {
                 // WhatsApp voice call via vision workflow - the handler talks
                 // progress + the spoken message over the call, non-blocking.
-                WhatsAppCallAutomationHandler.placeCall(
+                // BUG #2: delivery result flows back (false = route failed,
+                // spoken to the user by the handler after the call ends).
+                val delivered = WhatsAppCallAutomationHandler.placeCall(
                     contact = action.text ?: action.app.orEmpty(),
                     spokenMessage = action.message
+                )
+                LogBus.log(
+                    "wa_call result: " + if (delivered) "OK" else "FAILED (see [WA-CALL] log)",
+                    if (delivered) LogLevel.SUCCESS else LogLevel.WARN
                 )
             }
 

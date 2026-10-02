@@ -155,7 +155,13 @@ object WhatsAppCallAutomationHandler {
 
             // ---- stage 6: talk live over the call -----------------------
             if (!spokenMessage.isNullOrBlank()) {
-                deliverLive(accessibility, spokenMessage)
+                val delivered = deliverLive(accessibility, spokenMessage)
+                if (!delivered) {
+                    // endSession already ran inside deliverLive - this reaches
+                    // the normal speaker so the user KNOWS nothing was sent.
+                    announce("Call audio route failed - message not delivered")
+                    return false
+                }
             } else {
                 endSession()
             }
@@ -308,14 +314,21 @@ object WhatsAppCallAutomationHandler {
     }
 
     /**
-     * BUG #1 / FEATURE #3 - speak the message over the connected call ONLY:
-     *  - state must be CONNECTED (awaitConnected guarantees it),
-     *  - moves to SPEAKING while audio is on the wire,
-     *  - aborts immediately if the call ends mid-delivery,
-     *  - ends the session in `finally` so nothing plays afterwards on the
-     *    normal speaker (the "spoke after the call ended" bug).
+     * BUG #2 / FEATURE #3 - speak [message] on the connected call with
+     * VERIFIED routing. Three attempts, each logged with route diagnostics:
+     *   1. Gemini Live native voice, MODE_IN_COMMUNICATION +
+     *      USAGE_VOICE_COMMUNICATION (earpiece / call Bluetooth),
+     *   2. forced audio-mode re-switch + Android TTS speakOnCall (suspends
+     *      until onDone - proves playback actually completed),
+     *   3. speakerphone-ON loud fallback (acoustic path to the mic).
+     * Returns true ONLY when a playback completed - never claims a silent
+     * delivery. After a success it stays duplex while the call lives and
+     * logs explicitly when the live mic cannot start ("duplex unavailable").
      */
-    private suspend fun deliverLive(accessibility: SqlAccessibilityService, message: String) {
+    private suspend fun deliverLive(
+        accessibility: SqlAccessibilityService,
+        message: String
+    ): Boolean {
         val context = SqlAiApp.instance
         val liveSettings = try {
             SqlAiApp.settings.settings.first()
@@ -326,19 +339,76 @@ object WhatsAppCallAutomationHandler {
         if (CallStateMachine.current() != CallStateMachine.State.CONNECTED) {
             LogBus.log("[WA-CALL] deliver skipped - not CONNECTED", LogLevel.WARN)
             endSession()
-            return
+            return false
         }
 
-        LogBus.log("[WA-CALL] delivering message on-call: \"${message.take(60)}\"", LogLevel.INFO)
+        LogBus.log(
+            "[WA-CALL] delivering on-call route=${AudioManagerController.verifyCallRoute(context)}: " +
+                "\"${message.take(60)}\"",
+            LogLevel.INFO
+        )
+        var delivered = false
         try {
             CallStateMachine.to(CallStateMachine.State.SPEAKING)
-            if (GeminiLiveAudioEngine.isUsable(liveSettings)) {
+
+            // ---- attempt 1: Gemini Live over the communication route -----
+            if (!delivered && GeminiLiveAudioEngine.isUsable(liveSettings)) {
+                AudioManagerController.enterCallAudioMode(context, speakerphone = false)
                 GeminiLiveAudioEngine.enterCallMode(context)
-                GeminiLiveAudioEngine.speakText(liveSettings, message)
-                // Stay duplex so the recipient can answer back - but abort
+                LogBus.log(
+                    "[WA-CALL] route attempt 1 (gemini): " +
+                        AudioManagerController.verifyCallRoute(context),
+                    LogLevel.INFO
+                )
+                delivered = GeminiLiveAudioEngine.speakText(liveSettings, message)
+                if (!delivered) {
+                    LogBus.log("[WA-CALL] attempt 1 returned EMPTY", LogLevel.WARN)
+                }
+            }
+
+            // ---- attempt 2: forced mode re-switch + TTS on-call -----------
+            if (!delivered) {
+                LogBus.log("[WA-CALL] attempt 2: forced mode switch + TTS retry", LogLevel.WARN)
+                try {
+                    GeminiLiveAudioEngine.exitCallMode(context)
+                } catch (e: Exception) {
+                    // ignore
+                }
+                AudioManagerController.exitCallAudioMode(context)
+                delay(300)
+                AudioManagerController.enterCallAudioMode(context, speakerphone = false)
+                Speaker.enterCallMode(context, liveSettings)
+                delivered = Speaker.speakOnCall(message, liveSettings)
+                // Re-arm the live duplex mic for the talk-back phase.
+                GeminiLiveAudioEngine.enterCallMode(context)
+            }
+
+            // ---- attempt 3: speakerphone-ON loud fallback -----------------
+            if (!delivered) {
+                LogBus.log("[WA-CALL] attempt 3: speakerphone fallback", LogLevel.WARN)
+                AudioManagerController.enterCallAudioMode(context, speakerphone = true)
+                Speaker.enterCallMode(context, liveSettings)
+                delivered = Speaker.speakOnCall(message, liveSettings)
+            }
+
+            if (delivered) {
+                LogBus.log(
+                    "[WA-CALL] message DELIVERED route=" +
+                        AudioManagerController.verifyCallRoute(context),
+                    LogLevel.SUCCESS
+                )
+                // Duplex status: hear the recipient -> reply live.
+                if (GeminiLiveAudioEngine.isMicStreaming()) {
+                    LogBus.log("[WA-CALL] duplex active (live mic streaming)", LogLevel.SUCCESS)
+                } else {
+                    LogBus.log(
+                        "[WA-CALL] duplex unavailable (mic busy) - one-way message only",
+                        LogLevel.WARN
+                    )
+                }
+                // Stay in the call so the recipient can answer back - abort
                 // the moment the call really ends (no post-call speech).
-                // 12s grace: never misread the screen mid-playback (exitCallMode
-                // clears the play queue and would cut the message).
+                // 12s grace: never misread the screen mid-playback.
                 val start = System.currentTimeMillis()
                 val until = start + 45_000
                 while (System.currentTimeMillis() < until) {
@@ -359,17 +429,20 @@ object WhatsAppCallAutomationHandler {
                         if (!hasCallUi) break
                     }
                 }
-                GeminiLiveAudioEngine.exitCallMode(context)
-            } else if (CallStateMachine.isTtsAllowed()) {
-                val app = SqlAiApp.instance
-                Speaker.enterCallMode(app, liveSettings)
-                Speaker.speakOnCall(message, liveSettings)
-                Speaker.exitCallMode()
+            } else {
+                LogBus.log(
+                    "[WA-CALL] all route attempts FAILED " +
+                        AudioManagerController.verifyCallRoute(context),
+                    LogLevel.ERROR
+                )
             }
         } finally {
-            com.sqlai.assistant.core.ScreenshotLog.captureAndSave("Call_Message_Delivered")
+            com.sqlai.assistant.core.ScreenshotLog.captureAndSave(
+                if (delivered) "Call_Message_Delivered" else "Call_Message_FAILED"
+            )
             endSession()
         }
+        return delivered
     }
 
     /** True while the background mic capture of this handler is active. */

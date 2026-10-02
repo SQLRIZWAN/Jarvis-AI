@@ -218,6 +218,32 @@ object AudioManagerController {
 
     fun isCallMode(): Boolean = callMode
 
+    /**
+     * BUG #2 - route diagnostics proving where call audio is going:
+     * "in-comm|normal / earpiece|speaker / vol=N". Logged before+after every
+     * on-call message so a failed uplink is visible instead of silent.
+     */
+    fun verifyCallRoute(context: Context): String {
+        return try {
+            val m = am(context) ?: return "no-audio-manager"
+            val mode = when (m.mode) {
+                AudioManager.MODE_IN_COMMUNICATION -> "in-comm"
+                AudioManager.MODE_NORMAL -> "normal"
+                AudioManager.MODE_IN_CALL -> "in-call"
+                else -> "mode=${m.mode}"
+            }
+            val out = if (m.isSpeakerphoneOn) "speaker" else "earpiece"
+            val vol = try {
+                m.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
+            } catch (e: Exception) {
+                -1
+            }
+            "$mode/$out/vol=$vol"
+        } catch (e: Exception) {
+            "route-error:${e.message}"
+        }
+    }
+
     /** Mute/unmute the mic at the system level (used while the model speaks). */
     fun setMicMuted(context: Context, muted: Boolean) {
         try {
