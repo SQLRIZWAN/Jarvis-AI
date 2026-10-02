@@ -12,8 +12,8 @@ android {
         applicationId = "com.sqlai.assistant"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "5.0"
+        versionCode = 6
+        versionName = "5.0.1"
 
         // Dynamic launcher label: version-stamped app name, single source of
         // truth (strings.xml no longer defines app_name - duplicate resource
@@ -21,6 +21,21 @@ android {
         resValue("string", "app_name", "SQL AI v$versionName Pro")
 
         vectorDrawables.useSupportLibrary = true
+    }
+
+    // Stable signing: CI injects SQLAI_KEYSTORE_* secrets so EVERY build has
+    // the SAME certificate (auto-generated debug keystores change per runner
+    // and make upgrades fail with "package invalid"). Local builds without
+    // the env vars fall back to the normal debug keystore.
+    signingConfigs {
+        if (System.getenv("SQLAI_KEYSTORE_FILE") != null) {
+            create("stable") {
+                storeFile = file(System.getenv("SQLAI_KEYSTORE_FILE")!!)
+                storePassword = System.getenv("SQLAI_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("SQLAI_KEY_ALIAS")
+                keyPassword = System.getenv("SQLAI_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -31,9 +46,15 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (System.getenv("SQLAI_KEYSTORE_FILE") != null) {
+                signingConfig = signingConfigs.getByName("stable")
+            }
         }
         debug {
             isMinifyEnabled = false
+            if (System.getenv("SQLAI_KEYSTORE_FILE") != null) {
+                signingConfig = signingConfigs.getByName("stable")
+            }
         }
     }
 

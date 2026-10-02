@@ -31,6 +31,23 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      - name: Setup stable signing keystore
+        env:
+          KS_B64: ${{ secrets.SQLAI_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            printf '%s' "$KS_B64" | base64 -d > "$RUNNER_TEMP/sqlai-release.jks"
+            {
+              echo "SQLAI_KEYSTORE_FILE=$RUNNER_TEMP/sqlai-release.jks"
+              echo "SQLAI_KEYSTORE_PASSWORD=${{ secrets.SQLAI_KEYSTORE_PASSWORD }}"
+              echo "SQLAI_KEY_ALIAS=${{ secrets.SQLAI_KEY_ALIAS }}"
+              echo "SQLAI_KEY_PASSWORD=${{ secrets.SQLAI_KEY_PASSWORD }}"
+            } >> "$GITHUB_ENV"
+            echo "Stable keystore installed - all builds share one signature"
+          else
+            echo "No keystore secret - falling back to debug key (upgrades may fail)"
+          fi
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
