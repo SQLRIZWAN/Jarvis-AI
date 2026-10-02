@@ -236,8 +236,15 @@ object DeviceController {
                 if (pkg != null) {
                     val activityManager =
                         app.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-                    activityManager.killBackgroundProcesses(pkg)
-                    LogBus.log("Closed $pkg", LogLevel.SUCCESS)
+                    val canKill = app.checkSelfPermission(
+                        android.Manifest.permission.KILL_BACKGROUND_PROCESSES
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (canKill) {
+                        activityManager.killBackgroundProcesses(pkg)
+                        LogBus.log("Closed $pkg", LogLevel.SUCCESS)
+                    } else {
+                        LogBus.log("Close blocked - permission denied", LogLevel.WARN)
+                    }
                 }
             }
 
@@ -589,7 +596,10 @@ object DeviceController {
             } else {
                 @Suppress("DEPRECATION")
                 val bluetooth = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
-                if (bluetooth != null) {
+                val canToggle = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+                    app.checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) ==
+                        PackageManager.PERMISSION_GRANTED
+                if (bluetooth != null && canToggle) {
                     if (bluetooth.isEnabled) bluetooth.disable() else bluetooth.enable()
                     LogBus.log(if (bluetooth.isEnabled) "Bluetooth ON" else "Bluetooth OFF")
                 } else {

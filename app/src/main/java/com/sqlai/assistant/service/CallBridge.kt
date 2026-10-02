@@ -1,6 +1,7 @@
 package com.sqlai.assistant.service
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import android.telecom.TelecomManager
 import com.sqlai.assistant.core.LogBus
@@ -38,7 +39,10 @@ object CallBridge {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 val tm = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-                if (tm.endCall()) {
+                val canEnd = context.checkSelfPermission(
+                    android.Manifest.permission.ANSWER_PHONE_CALLS
+                ) == PackageManager.PERMISSION_GRANTED
+                if (canEnd && tm.endCall()) {
                     LogBus.log("Call ended via TelecomManager", LogLevel.SUCCESS)
                     return
                 }

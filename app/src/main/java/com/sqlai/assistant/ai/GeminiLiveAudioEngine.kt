@@ -1,6 +1,7 @@
 package com.sqlai.assistant.ai
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -685,33 +686,42 @@ object GeminiLiveAudioEngine {
         return null
     }
 
-    private fun openRecord(): AudioRecord? = try {
-        val source = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION
-        } else {
-            MediaRecorder.AudioSource.MIC
+    private fun openRecord(): AudioRecord? {
+        val context = try { SqlAiApp.instance } catch (e: Exception) { null }
+        val granted = context?.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            Log.w(TAG, "RECORD_AUDIO not granted - mic stays closed")
+            return null
         }
-        val minBuf = AudioRecord.getMinBufferSize(
-            INPUT_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
-        val rec = AudioRecord(
-            source,
-            INPUT_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            maxOf(minBuf, INPUT_RATE)
-        )
-        if (rec.state != AudioRecord.STATE_INITIALIZED) {
-            rec.release()
+        return try {
+            val source = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION
+            } else {
+                MediaRecorder.AudioSource.MIC
+            }
+            val minBuf = AudioRecord.getMinBufferSize(
+                INPUT_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+            val rec = AudioRecord(
+                source,
+                INPUT_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(minBuf, INPUT_RATE)
+            )
+            if (rec.state != AudioRecord.STATE_INITIALIZED) {
+                rec.release()
+                null
+            } else {
+                rec
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "AudioRecord open failed", e)
             null
-        } else {
-            rec
         }
-    } catch (e: Exception) {
-        Log.w(TAG, "AudioRecord open failed", e)
-        null
     }
 
     // ------------------------------------------------------------- playback
