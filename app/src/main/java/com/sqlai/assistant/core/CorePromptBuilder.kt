@@ -187,7 +187,11 @@ object CorePromptBuilder {
     }
 
     /** Core prompt + user context + language directive for a prompt kind. */
-    fun build(kind: Kind, settings: AppSettings): String {
+    fun build(
+        kind: Kind,
+        settings: AppSettings,
+        journalBlock: () -> String = { TaskStateManager.pinnedTaskBlock() }
+    ): String {
         val core = when (kind) {
             Kind.ACTION -> CORE_ACTION
             Kind.AGENT -> CORE_AGENT
@@ -197,6 +201,14 @@ object CorePromptBuilder {
         val sb = StringBuilder(core)
         if (kind != Kind.REPLY) sb.append(settings.languageInstruction())
         sb.append(userContext(settings))
+        // BUG #3: TASK + JOURNAL pinned at system level - the conversation
+        // history may trim, the task header can never leave the prompt.
+        if (kind == Kind.ACTION || kind == Kind.AGENT) {
+            val pin = journalBlock()
+            if (pin.isNotBlank()) {
+                sb.append("\n\nTASK PIN (always active, never trimmed):\n").append(pin)
+            }
+        }
         return sb.toString()
     }
 

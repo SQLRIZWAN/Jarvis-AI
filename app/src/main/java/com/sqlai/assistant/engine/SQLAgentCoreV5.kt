@@ -282,9 +282,14 @@ object SQLAgentCoreV5 {
             }
 
             if (noProgressStreak >= NO_PROGRESS_LIMIT) {
-                TaskStateManager.clear(SqlAiApp.instance)
-                LogBus.log("Agent stopped: no progress after $NO_PROGRESS_LIMIT attempts", LogLevel.WARN)
-                Speaker.post("I could not complete that task.")
+                // BUG #2 (v7): journal stays ACTIVE on failure - the next
+                // attempt resumes from the recorded position, never step 1.
+                LogBus.log(
+                    "Agent stopped: no progress after $NO_PROGRESS_LIMIT attempts " +
+                        "(journal kept for resume)",
+                    LogLevel.WARN
+                )
+                Speaker.post("I could not complete that task. Say it again to resume.")
                 break
             }
 
@@ -328,7 +333,11 @@ object SQLAgentCoreV5 {
         }
 
         StateBus.setState(AssistantState.IDLE)
-        if (shouldStop()) LogBus.log("Agent stopped by user (task state kept for resume)", LogLevel.WARN)
+        if (shouldStop()) {
+            // v7: explicit user stop is one of the ONLY two clear() cases.
+            TaskStateManager.clear(SqlAiApp.instance)
+            LogBus.log("Agent stopped by user - task journal cleared", LogLevel.WARN)
+        }
         if (completed) {
             stuckStreak = 0
         }

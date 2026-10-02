@@ -97,4 +97,8 @@ dependencies {
 
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    testImplementation("junit:junit:4.13.2")
+    // Real org.json on the JVM - the mockable android.jar stubs would throw.
+    testImplementation("org.json:json:20240303")
 }

@@ -5,27 +5,30 @@ import android.content.SharedPreferences
 import com.sqlai.assistant.SqlAiApp
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 
 /**
- * BUG #2 / BUG #5 - persistent task state.
+ * v7 TASK JOURNAL - persistent resume state (BUG #1 / BUG #2 / BUG #3).
  *
- * Every agent task keeps its executed milestones (sub-steps that already
- * verified OK) plus the remaining ones. The snapshot survives:
- *  - Gemini-call interruptions (the wa_call workflow blocks the engine),
- *  - engine restarts / service restarts,
- *  - app process death (SharedPreferences).
+ * The journal decides resume - NOT task-string similarity. Any ACTIVE
+ * journal (status=running, updated_at < 24h) is resumed with its completed
+ * milestones no matter how the user rephrases the task, and progress is
+ * NEVER deleted on failure: clear() runs only on verified success or an
+ * explicit user stop. Storage: SharedPreferences "task_journal" + org.json
+ * (the app's existing pattern - no Room/KSP).
  *
- * On recovery the engine rehydrates the snapshot, feeds
- * "COMPLETED: [...]; REMAINING: [...]" into every think() so the model
- * NEVER restarts from step 1.
+ * Every model turn gets [stateBlock] (COMPLETED / STILL REMAINING / LAST
+ * POSITION) and the system prompt gets [pinnedTaskBlock], so history trim
+ * can never drop the original TASK header.
+ *
+ * The pure logic + JSON codec live in [TaskJournal] (JVM unit-testable).
  */
 object TaskStateManager {
 
-    private const val TAG = "TaskStateManager"
-    private const val PREFS = "task_state"
-    private const val KEY_SNAPSHOT = "snapshot"
-    private const val FRESH_MS = 24 * 60 * 60 * 1000L // survive restarts up to 24h
+    private const val PREFS = "task_journal"
+    private const val KEY_JOURNAL = "journal"
 
+    /** Public view kept identical for existing call sites (SQLAgentCoreV5). */
     data class Snapshot(
         val task: String,
         val subgoals: List<String>,
@@ -37,114 +40,280 @@ object TaskStateManager {
     }
 
     @Volatile
-    private var current: Snapshot? = null
+    private var current: TaskJournal.Journal? = null
 
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    /** Start (or resume) a task. Restores the snapshot if it is fresh and for the same task. */
+    // ---------------------------------------------------------- lifecycle
+
+    /** Start (or resume) a task from the ACTIVE journal - wording never matters. */
     @Synchronized
     fun begin(context: Context, task: String, subgoals: List<String>): Snapshot {
-        val stored = load(context)
-        val fresh = stored != null &&
-            System.currentTimeMillis() - updatedAt(context) < FRESH_MS
-        val snapshot = if (fresh && stored != null && similar(stored.task, task)) {
-            // Resume: keep completed milestones, merge any new subgoals.
-            stored.copy(
-                task = task,
-                subgoals = (stored.subgoals + subgoals).distinct()
-            )
-        } else {
-            Snapshot(task, subgoals.distinct(), emptyList(), null)
-        }
-        save(context, snapshot)
-        LogBus.log(
-            "[TASK] begin: ${snapshot.completed.size} done / " +
-                "${snapshot.remaining.size} remaining", LogLevel.INFO
+        val stored = TaskJournal.decode(prefs(context).getString(KEY_JOURNAL, null))
+        val journal = TaskJournal.resume(
+            stored, task, subgoals.distinct(), System.currentTimeMillis()
         )
-        return snapshot
+        persist(context, journal)
+        LogBus.log(
+            "[TASK] begin ${journal.taskId.take(8)}: ${journal.completed.size} done / " +
+                "${journal.remaining.size} remaining",
+            LogLevel.INFO
+        )
+        return snapshotOf(journal)
     }
 
     @Synchronized
     fun markCompleted(context: Context, milestone: String) {
-        val s = current ?: load(context) ?: return
-        if (milestone.isBlank() || milestone in s.completed) return
-        val next = s.copy(completed = (s.completed + milestone).distinct())
-        save(context, next)
-        LogBus.log("[TASK] milestone done: $milestone (${next.completed.size}/${next.subgoals.size})", LogLevel.SUCCESS)
+        val journal = currentOrStored(context) ?: return
+        if (milestone.isBlank() || milestone in journal.completed) return
+        val next = TaskJournal.withMilestone(journal, milestone, System.currentTimeMillis())
+        persist(context, next)
+        LogBus.log(
+            "[TASK] milestone done: $milestone (${next.completed.size}/${next.subgoals.size})",
+            LogLevel.SUCCESS
+        )
     }
 
     @Synchronized
     fun setPendingCallMessage(context: Context, message: String?) {
-        val s = current ?: load(context) ?: return
-        save(context, s.copy(pendingCallMessage = message))
+        val journal = currentOrStored(context) ?: return
+        persist(
+            context,
+            journal.copy(pendingCallMessage = message, updatedAt = System.currentTimeMillis())
+        )
     }
 
-    /** Human-readable state block injected into every model think(). */
-    fun stateBlock(): String {
-        val s = current ?: return ""
-        if (s.subgoals.isEmpty()) return ""
-        val done = if (s.completed.isEmpty()) "(none)" else s.completed.joinToString(", ")
-        val left = if (s.remaining.isEmpty()) "(none)" else s.remaining.joinToString(", ")
-        return "TASK STATE - COMPLETED (never redo these): $done\nSTILL REMAINING: $left"
-    }
+    /** Human-readable state block injected into every model turn. */
+    fun stateBlock(): String = TaskJournal.stateBlock(current)
 
-    fun snapshot(): Snapshot? = current ?: load(SqlAiApp.instance)
+    /** TASK + state pinned into the system prompt (survives history trim). */
+    fun pinnedTaskBlock(): String = TaskJournal.pinnedBlock(current)
 
-    /** Clear on task success / unrecoverable failure. */
+    fun snapshot(): Snapshot? =
+        (current ?: stored(SqlAiApp.instance))?.let { snapshotOf(it) }
+
+    /** Clear ONLY on verified success or explicit user stop - NEVER on failure. */
     @Synchronized
     fun clear(context: Context) {
         current = null
-        prefs(context).edit().remove(KEY_SNAPSHOT).remove("updated_at").apply()
+        prefs(context).edit().remove(KEY_JOURNAL).apply()
     }
 
     // --------------------------------------------------------------- storage
 
-    private fun updatedAt(context: Context): Long =
-        prefs(context).getLong("updated_at", 0L)
+    private fun currentOrStored(context: Context): TaskJournal.Journal? =
+        current ?: stored(context)
 
-    private fun load(context: Context): Snapshot? {
+    private fun stored(context: Context): TaskJournal.Journal? {
         current?.let { return it }
-        val raw = prefs(context).getString(KEY_SNAPSHOT, null) ?: return null
+        val journal = TaskJournal.decode(prefs(context).getString(KEY_JOURNAL, null))
+            ?: return null
+        current = journal
+        return journal
+    }
+
+    private fun persist(context: Context, journal: TaskJournal.Journal) {
+        current = journal
+        prefs(context).edit()
+            .putString(KEY_JOURNAL, TaskJournal.encode(journal))
+            .apply()
+    }
+
+    private fun snapshotOf(j: TaskJournal.Journal): Snapshot = Snapshot(
+        task = j.task,
+        subgoals = j.subgoals.map { it.label },
+        completed = j.completed,
+        pendingCallMessage = j.pendingCallMessage
+    )
+}
+
+/**
+ * Pure journal logic + JSON codec - no Android imports so the resume rules
+ * are unit-testable on the JVM.
+ */
+object TaskJournal {
+
+    const val STATUS_RUNNING = "running"
+    const val STATUS_DONE = "done"
+    const val STATUS_FAILED = "failed"
+    const val STATUS_CANCELLED = "cancelled"
+    const val STATUS_SUPERSEDED = "superseded"
+
+    const val GOAL_PENDING = "pending"
+    const val GOAL_DONE = "done"
+    const val GOAL_BLOCKED = "blocked"
+
+    private const val FRESH_MS = 24 * 60 * 60 * 1000L
+
+    /** One ordered micro-goal with its verification status. */
+    data class Subgoal(
+        val label: String,
+        val status: String = GOAL_PENDING,
+        val proof: String? = null,
+        val attempts: Int = 0
+    )
+
+    /** Full journal schema (persisted as JSON). */
+    data class Journal(
+        val taskId: String,
+        val task: String,
+        val createdAt: Long,
+        val updatedAt: Long,
+        val status: String,
+        val step: Int = 0,
+        val lastPackage: String? = null,
+        val lastAction: String? = null,
+        val lastScreenHash: String? = null,
+        val subgoals: List<Subgoal> = emptyList(),
+        val pendingCallMessage: String? = null
+    ) {
+        val completed: List<String>
+            get() = subgoals.filter { it.status == GOAL_DONE }.map { it.label }
+
+        val remaining: List<String>
+            get() = subgoals.filter { it.status != GOAL_DONE }.map { it.label }
+    }
+
+    /**
+     * Resume the ACTIVE journal (running + fresh) regardless of wording -
+     * rephrased tasks keep their completed milestones. Anything else starts
+     * a brand-new journal with a fresh UUID.
+     */
+    fun resume(
+        stored: Journal?,
+        task: String,
+        subgoals: List<String>,
+        now: Long
+    ): Journal {
+        val active = stored != null &&
+            stored.status == STATUS_RUNNING &&
+            now - stored.updatedAt < FRESH_MS
+        if (!active) {
+            return Journal(
+                taskId = UUID.randomUUID().toString(),
+                task = task,
+                createdAt = now,
+                updatedAt = now,
+                status = STATUS_RUNNING,
+                subgoals = subgoals.distinct().map { Subgoal(it) }
+            )
+        }
+        val merged = LinkedHashMap<String, Subgoal>()
+        stored.subgoals.forEach { merged[it.label] = it }
+        subgoals.distinct().forEach {
+            if (!merged.containsKey(it)) merged[it] = Subgoal(it)
+        }
+        return stored.copy(
+            task = task,
+            updatedAt = now,
+            subgoals = merged.values.toList()
+        )
+    }
+
+    /** Mark a milestone done (adds it as a done sub-goal when new). */
+    fun withMilestone(journal: Journal, milestone: String, now: Long): Journal {
+        val label = milestone.trim()
+        if (label.isEmpty()) return journal
+        val subs = if (journal.subgoals.any { it.label == label }) {
+            journal.subgoals.map {
+                if (it.label == label) it.copy(status = GOAL_DONE) else it
+            }
+        } else {
+            journal.subgoals + Subgoal(label, GOAL_DONE)
+        }
+        return journal.copy(updatedAt = now, subgoals = subs)
+    }
+
+    /** COMPLETED (never redo) + STILL REMAINING + LAST POSITION. */
+    fun stateBlock(journal: Journal?): String {
+        if (journal == null) return ""
+        val done = journal.completed.ifEmpty { listOf("(none)") }.joinToString(", ")
+        val left = journal.remaining.ifEmpty { listOf("(none)") }.joinToString(", ")
+        return "TASK STATE - COMPLETED (never redo these): $done\n" +
+            "STILL REMAINING: $left\n" +
+            "LAST POSITION: package=${journal.lastPackage ?: "?"}, step=${journal.step}"
+    }
+
+    /** TASK header + state - appended to the system prompt so trim-proof. */
+    fun pinnedBlock(journal: Journal?): String {
+        if (journal == null) return ""
+        val state = stateBlock(journal)
+        return if (state.isEmpty()) "TASK: ${journal.task}" else "TASK: ${journal.task}\n$state"
+    }
+
+    fun encode(journal: Journal): String = JSONObject()
+        .put("taskId", journal.taskId)
+        .put("task", journal.task)
+        .put("createdAt", journal.createdAt)
+        .put("updatedAt", journal.updatedAt)
+        .put("status", journal.status)
+        .put("step", journal.step)
+        .put("lastPackage", journal.lastPackage ?: JSONObject.NULL)
+        .put("lastAction", journal.lastAction ?: JSONObject.NULL)
+        .put("lastScreenHash", journal.lastScreenHash ?: JSONObject.NULL)
+        .put(
+            "subgoals",
+            JSONArray().also { arr ->
+                journal.subgoals.forEach { g ->
+                    arr.put(
+                        JSONObject()
+                            .put("label", g.label)
+                            .put("status", g.status)
+                            .put("proof", g.proof ?: JSONObject.NULL)
+                            .put("attempts", g.attempts)
+                    )
+                }
+            }
+        )
+        .put("pendingCallMessage", journal.pendingCallMessage ?: JSONObject.NULL)
+        .toString()
+
+    /** Decode persisted JSON - corrupt/blank input degrades gracefully to null. */
+    fun decode(raw: String?): Journal? {
+        if (raw.isNullOrBlank()) return null
         return try {
             val o = JSONObject(raw)
-            val sub = o.getJSONArray("subgoals").toStringList()
-            val done = o.getJSONArray("completed").toStringList()
-            val s = Snapshot(
-                task = o.getString("task"),
-                subgoals = sub,
-                completed = done,
-                pendingCallMessage = if (o.isNull("pending")) null else o.getString("pending")
+            val task = o.optString("task").trim()
+            if (task.isEmpty()) return null
+            val subs = mutableListOf<Subgoal>()
+            val arr = o.optJSONArray("subgoals")
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    val s = arr.optJSONObject(i) ?: continue
+                    val label = s.optString("label").trim()
+                    if (label.isEmpty()) continue
+                    subs.add(
+                        Subgoal(
+                            label = label,
+                            status = s.optString("status", GOAL_PENDING)
+                                .ifBlank { GOAL_PENDING },
+                            proof = if (s.isNull("proof")) null
+                                else s.optString("proof").takeIf { it.isNotBlank() },
+                            attempts = s.optInt("attempts", 0)
+                        )
+                    )
+                }
+            }
+            Journal(
+                taskId = o.optString("taskId").ifBlank { UUID.randomUUID().toString() },
+                task = task,
+                createdAt = o.optLong("createdAt", 0L),
+                updatedAt = o.optLong("updatedAt", 0L),
+                status = o.optString("status", STATUS_RUNNING).ifBlank { STATUS_RUNNING },
+                step = o.optInt("step", 0),
+                lastPackage = o.optStringOrNull("lastPackage"),
+                lastAction = o.optStringOrNull("lastAction"),
+                lastScreenHash = o.optStringOrNull("lastScreenHash"),
+                subgoals = subs,
+                pendingCallMessage = if (o.isNull("pendingCallMessage")) null
+                    else o.optString("pendingCallMessage")
             )
-            current = s
-            s
-        } catch (e: Exception) {
-            LogBus.log("[TASK] snapshot corrupt: ${e.message}", LogLevel.WARN)
+        } catch (t: Throwable) {
             null
         }
     }
 
-    private fun save(context: Context, s: Snapshot) {
-        current = s
-        val o = JSONObject()
-            .put("task", s.task)
-            .put("subgoals", JSONArray(s.subgoals))
-            .put("completed", JSONArray(s.completed))
-            .put("pending", s.pendingCallMessage ?: JSONObject.NULL)
-        prefs(context).edit()
-            .putString(KEY_SNAPSHOT, o.toString())
-            .putLong("updated_at", System.currentTimeMillis())
-            .apply()
-    }
-
-    private fun similar(a: String, b: String): Boolean {
-        val x = a.trim().lowercase()
-        val y = b.trim().lowercase()
-        if (x == y) return true
-        // Same task said differently in Hinglish/English - cheap containment test.
-        return (x.length > 12 && y.contains(x)) || (y.length > 12 && x.contains(y))
-    }
-
-    private fun JSONArray.toStringList(): List<String> =
-        (0 until length()).map { getString(it) }
+    private fun JSONObject.optStringOrNull(key: String): String? =
+        if (has(key) && !isNull(key)) optString(key).takeIf { it.isNotBlank() } else null
 }
