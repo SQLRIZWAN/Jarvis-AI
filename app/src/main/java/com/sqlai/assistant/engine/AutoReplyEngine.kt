@@ -3,6 +3,7 @@ package com.sqlai.assistant.engine
 import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.ai.AiClient
 import com.sqlai.assistant.ai.ChatMessage
+import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.device.DeviceController
@@ -35,7 +36,7 @@ object AutoReplyEngine {
         "org.telegram.messenger.web"
     )
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + AppCrashHandler.coroutineHandler)
     private val lastReplied = ConcurrentHashMap<String, Long>()
 
     fun onMessage(pkg: String, title: String, message: String) {

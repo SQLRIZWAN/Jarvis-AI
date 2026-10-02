@@ -18,6 +18,7 @@ import android.speech.SpeechRecognizer
 import androidx.core.app.ServiceCompat
 import com.sqlai.assistant.R
 import com.sqlai.assistant.SqlAiApp
+import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.AssistantState
 import com.sqlai.assistant.core.AudioManagerController
 import com.sqlai.assistant.core.LogBus
@@ -87,7 +88,7 @@ class ListeningService : Service() {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main + AppCrashHandler.coroutineHandler)
     private var settingsJob: Job? = null
     private var overlayJob: Job? = null
 

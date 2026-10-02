@@ -3,6 +3,7 @@ package com.sqlai.assistant.ai
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.AppSettings
 import com.sqlai.assistant.core.AudioManagerController
 import com.sqlai.assistant.core.AiProvider
@@ -68,7 +69,7 @@ object GeminiMaleVoiceStreamer {
         .pingInterval(20, TimeUnit.SECONDS)
         .build()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + AppCrashHandler.coroutineHandler)
     private val mutex = Mutex()
 
     @Volatile private var socket: WebSocket? = null

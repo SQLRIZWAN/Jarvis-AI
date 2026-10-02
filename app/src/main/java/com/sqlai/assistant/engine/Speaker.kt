@@ -9,6 +9,7 @@ import android.util.Log
 import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.ai.GeminiLiveAudioEngine
 import com.sqlai.assistant.ai.GeminiMaleVoiceStreamer
+import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.AppSettings
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
@@ -78,7 +79,7 @@ object Speaker {
         val result: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
     )
 
-    private val speechScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val speechScope = CoroutineScope(SupervisorJob() + Dispatchers.Main + AppCrashHandler.coroutineHandler)
     private val queueLock = Any()
     private val pendingLines = ArrayDeque<Pending>()
     private val signal = Channel<Unit>(Channel.CONFLATED)

@@ -3,6 +3,7 @@ package com.sqlai.assistant.engine
 import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.ai.AiClient
 import com.sqlai.assistant.ai.ChatMessage
+import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.AssistantState
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
@@ -51,7 +52,7 @@ object HistoryStore {
  */
 object AssistantEngine {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + AppCrashHandler.coroutineHandler)
     private val mutex = Mutex()
 
     /** Fire-and-forget entry point used by the listening + assist services. */

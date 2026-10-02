@@ -5,6 +5,7 @@ import android.util.Log
 import android.service.notification.StatusBarNotification
 import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.ai.GeminiLiveAudioEngine
+import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.device.DeviceController
@@ -45,7 +46,7 @@ object WhatsAppCallAndMessageService {
         "org.telegram.messenger.web"
     )
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + AppCrashHandler.coroutineHandler)
 
     @Volatile private var liveCallSession = false
     @Volatile private var lastCallPkg = ""

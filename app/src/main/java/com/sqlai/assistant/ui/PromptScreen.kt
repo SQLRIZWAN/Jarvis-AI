@@ -35,6 +35,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import com.sqlai.assistant.SqlAiApp
+import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.CorePromptBuilder
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
@@ -49,7 +50,7 @@ import kotlinx.coroutines.launch
  */
 @Composable
 fun PromptScreen() {
-    val scope = rememberCoroutineScope()
+    val scope = rememberCoroutineScope(context = AppCrashHandler.coroutineHandler)
     val settings by SqlAiApp.settings.settings.collectAsState(initial = null)
 
     var userName by remember { mutableStateOf("") }

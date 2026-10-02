@@ -66,7 +66,7 @@
         android:required="true" />
 
     <application
-        android:name=".SqlAiApp"
+        android:name=".SQLApplicationV6"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"

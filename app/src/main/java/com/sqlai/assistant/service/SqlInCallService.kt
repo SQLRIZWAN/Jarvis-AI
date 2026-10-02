@@ -7,6 +7,7 @@ import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.ai.AiClient
 import com.sqlai.assistant.ai.ChatMessage
 import com.sqlai.assistant.ai.GeminiLiveAudioEngine
+import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.core.StateBus
@@ -62,7 +63,7 @@ class SqlInCallService : InCallService() {
             } == true
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main + AppCrashHandler.coroutineHandler)
     private var sessionJob: Job? = null
 
     @Volatile
@@ -86,6 +87,11 @@ class SqlInCallService : InCallService() {
     }
 
     override fun onDestroy() {
+        try {
+            activeCall?.unregisterCallback(callCallback)
+        } catch (e: Exception) {
+            // Already unregistered.
+        }
         stopSession()
         if (instance === this) instance = null
         scope.cancel()

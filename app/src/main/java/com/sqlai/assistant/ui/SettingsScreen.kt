@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sqlai.assistant.BuildConfig
 import com.sqlai.assistant.SqlAiApp
+import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.AssistantLanguage
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
@@ -53,7 +54,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun SettingsScreen() {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val scope = rememberCoroutineScope(context = AppCrashHandler.coroutineHandler)
     val settings by SqlAiApp.settings.settings.collectAsState(initial = null)
 
     var wakeWord by remember { mutableStateOf("sql") }

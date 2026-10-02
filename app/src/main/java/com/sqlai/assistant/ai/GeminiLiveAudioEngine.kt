@@ -10,6 +10,7 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
 import com.sqlai.assistant.SqlAiApp
+import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.AiProvider
 import com.sqlai.assistant.core.AudioManagerController
 import com.sqlai.assistant.core.AppSettings
@@ -85,7 +86,7 @@ object GeminiLiveAudioEngine {
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + AppCrashHandler.coroutineHandler)
     private val mutex = kotlinx.coroutines.sync.Mutex()
 
     @Volatile private var webSocket: WebSocket? = null

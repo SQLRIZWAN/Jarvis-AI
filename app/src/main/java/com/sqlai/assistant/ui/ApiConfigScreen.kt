@@ -48,6 +48,7 @@ import com.sqlai.assistant.ai.AiClient
 import com.sqlai.assistant.ai.AiException
 import com.sqlai.assistant.ai.GeminiModel
 import com.sqlai.assistant.ai.GeminiModelFetcher
+import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.AiProvider
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
@@ -58,7 +59,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ApiConfigScreen() {
-    val scope = rememberCoroutineScope()
+    val scope = rememberCoroutineScope(context = AppCrashHandler.coroutineHandler)
     val settings by SqlAiApp.settings.settings.collectAsState(initial = null)
 
     var apiKey by remember { mutableStateOf("") }

@@ -4,10 +4,12 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.sqlai.assistant.SqlAiApp
+import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -22,7 +24,7 @@ class BootReceiver : BroadcastReceiver() {
         ) return
 
         val pending = goAsync()
-        CoroutineScope(Dispatchers.IO).launch {
+        CoroutineScope(SupervisorJob() + Dispatchers.IO + AppCrashHandler.coroutineHandler).launch {
             try {
                 val settings = SqlAiApp.settings.settings.first()
                 if (settings.bootRestartEnabled &&
