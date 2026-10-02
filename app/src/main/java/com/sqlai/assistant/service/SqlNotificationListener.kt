@@ -6,6 +6,7 @@ import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -45,7 +46,7 @@ class SqlNotificationListener : NotificationListenerService() {
             while (recent.size > MAX_KEPT) recent.removeFirst()
         }
 
-        if (sbn.packageName == context.packageName) return
+        if (sbn.packageName == packageName) return
 
         // WhatsApp / messenger auto-reply
         com.sqlai.assistant.engine.AutoReplyEngine.onMessage(
@@ -85,7 +86,7 @@ class SqlNotificationListener : NotificationListenerService() {
                 if (pkgResolved == null) return@launch
                 com.sqlai.assistant.device.DeviceController.launchPackage(pkgResolved)
                 delay(2200)
-                val svc = instance ?: return@launch
+                val svc = SqlAccessibilityService.instance ?: return@launch
                 val answered = svc.clickText("Answer") ||
                     svc.clickText("Accept") ||
                     svc.clickText("answer") ||

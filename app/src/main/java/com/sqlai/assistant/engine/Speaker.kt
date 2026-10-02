@@ -3,6 +3,7 @@ package com.sqlai.assistant.engine
 import android.content.Context
 import android.media.AudioAttributes
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import android.util.Log
 import com.sqlai.assistant.SqlAiApp
@@ -46,7 +47,7 @@ object Speaker {
             tts = TextToSpeech(context.applicationContext) { status ->
                 val engine = tts ?: return@TextToSpeech
                 if (status == TextToSpeech.SUCCESS) {
-                    engine.setOnUtteranceProgressListener(object : TextToSpeech.UtteranceProgressListener() {
+                    engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) = Unit
 
                         override fun onDone(utteranceId: String?) {
@@ -185,7 +186,7 @@ object Speaker {
 
         val genderFactor = if (settings.voiceGender == VoiceGender.FEMALE) 1.18f else 0.90f
         try {
-            engine.pitch = (settings.pitch * genderFactor).coerceIn(0.5f, 2.0f)
+            engine.setPitch((settings.pitch * genderFactor).coerceIn(0.5f, 2.0f))
         } catch (e: Exception) {
             // Ignore engine quirks.
         }

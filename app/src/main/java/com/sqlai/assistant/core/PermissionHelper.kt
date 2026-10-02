@@ -169,7 +169,7 @@ object PermissionHelper {
         return try {
             val intent = Intent("android.settings.VOICE_INPUT_SETTINGS")
             isAccessibilityEnabled(context) &&
-                intent.resolveActivity(context.packageName) != null &&
+                intent.resolveActivity(context.packageManager) != null &&
                 has(context, Manifest.permission.RECORD_AUDIO)
         } catch (e: Exception) {
             false

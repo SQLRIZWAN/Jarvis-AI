@@ -8,6 +8,7 @@ import android.content.ClipboardManager
 import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.sqlai.assistant.core.LogBus
@@ -24,6 +25,8 @@ import kotlin.coroutines.resume
 class SqlAccessibilityService : AccessibilityService() {
 
     companion object {
+        private const val TAG = "SqlAiA11y"
+
         @Volatile
         var instance: SqlAccessibilityService? = null
             private set
@@ -168,12 +171,33 @@ class SqlAccessibilityService : AccessibilityService() {
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return null
         return kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
             try {
-                val executor = java.util.concurrent.Executor { it.run() }
+                val executor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+                    Thread(r, "sqlai-shot").apply { isDaemon = true }
+                }
                 takeScreenshot(
+                    android.view.Display.DEFAULT_DISPLAY,
                     executor,
                     object : TakeScreenshotCallback {
-                        override fun onSuccess(info: ScreenshotResult, bitmap: android.graphics.Bitmap) {
-                            if (continuation.isActive) continuation.resume(bitmap)
+                        override fun onSuccess(screenshot: ScreenshotResult) {
+                            var result: android.graphics.Bitmap? = null
+                            try {
+                                val buffer = screenshot.hardwareBuffer
+                                val bmp = android.graphics.Bitmap.wrapHardwareBuffer(
+                                    buffer,
+                                    screenshot.colorSpace
+                                )
+                                if (bmp != null) {
+                                    result = if (bmp.config == android.graphics.Bitmap.Config.HARDWARE) {
+                                        bmp.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+                                    } else {
+                                        bmp
+                                    }
+                                }
+                                buffer?.close()
+                            } catch (e: Exception) {
+                                Log.w(TAG, "screenshot convert failed", e)
+                            }
+                            if (continuation.isActive) continuation.resume(result)
                         }
 
                         override fun onFailure(errorCode: Int) {

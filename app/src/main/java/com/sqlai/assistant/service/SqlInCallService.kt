@@ -42,7 +42,7 @@ class SqlInCallService : InCallService() {
             instance?.activeCall?.let { call ->
                 try {
                     if (call.state == Call.STATE_RINGING) {
-                        call.answer(VideoProfile.STATE_AUDIO)
+                        call.answer(VideoProfile.STATE_AUDIO_ONLY)
                         true
                     } else false
                 } catch (e: Exception) {
@@ -123,7 +123,7 @@ class SqlInCallService : InCallService() {
         when (call.state) {
             Call.STATE_RINGING -> {
                 try {
-                    call.answer(VideoProfile.STATE_AUDIO)
+                    call.answer(VideoProfile.STATE_AUDIO_ONLY)
                     LogBus.log("Call auto-answered", LogLevel.SUCCESS)
                 } catch (e: Exception) {
                     LogBus.log("Auto-answer failed: ${e.message}", LogLevel.ERROR)

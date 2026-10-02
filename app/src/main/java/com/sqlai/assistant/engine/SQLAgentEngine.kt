@@ -55,7 +55,7 @@ object SQLAgentEngine {
 
         for (step in 1..settings.agentMaxSteps) {
             StateBus.setState(AssistantState.PROCESSING)
-            StateBus.setCommand("step $step/$max: $task")
+            StateBus.setCommand("step $step/${settings.agentMaxSteps}: $task")
             LogBus.log("Agent step $step/${settings.agentMaxSteps} - thinking...")
 
             // ---- OBSERVE --------------------------------------------------
