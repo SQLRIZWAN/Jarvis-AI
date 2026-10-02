@@ -167,16 +167,18 @@ object WhatsAppCallAutomationHandler {
 
             // ---- stage 6: talk live over the call -----------------------
             if (!spokenMessage.isNullOrBlank()) {
-                val delivered = deliverLive(accessibility, spokenMessage)
+                val delivered = deliverLive(spokenMessage)
                 if (!delivered) {
                     // endSession already ran inside deliverLive - this reaches
                     // the normal speaker so the user KNOWS nothing was sent.
                     announce("Call audio route failed - message not delivered")
                     return false
                 }
-                // G5: session already ended inside deliverLive - normal
-                // speaker, phone back to normal audio, call stays live.
-                announce("Message delivered. Call is live - aap baat karo.")
+                // v6.0: session already ended inside deliverLive (normal
+                // audio restored) - now the autonomous bridge takes the call
+                // over. No handover to the local user, no fixed reply window.
+                announce("Message delivered. Ab main inke saath baat karunga.")
+                AutonomousCallBridgeService.start(SqlAiApp.instance)
             } else {
                 // G2 F1: blank message used to end the session SILENTLY right
                 // after connect (no speech, no mic). Now: keep duplex up so
@@ -192,12 +194,11 @@ object WhatsAppCallAutomationHandler {
                 if (GeminiLiveAudioEngine.isUsable(st)) {
                     GeminiLiveAudioEngine.enterCallMode(SqlAiApp.instance)
                 }
-                announce("Call is connected. Aap bol sakte hain.")
-                // G5: 10s reply window ONLY - then restore audio. The WhatsApp
-                // call keeps running on its own; we must NEVER sit in call
-                // mode for minutes (user: "call laga kar baithak jata hai").
-                holdUntilCallEnds(accessibility, maxMs = 10_000)
-                endSession()
+                // v6.0: NO handover to the user. The autonomous bridge keeps
+                // the live conversation going until the call visibly ends -
+                // the agent gets control back immediately.
+                announce("Call connected. Ab main inke saath baat karunga.")
+                AutonomousCallBridgeService.start(SqlAiApp.instance)
             }
             true
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -368,10 +369,7 @@ object WhatsAppCallAutomationHandler {
      * delivery. After a success it stays duplex while the call lives and
      * logs explicitly when the live mic cannot start ("duplex unavailable").
      */
-    private suspend fun deliverLive(
-        accessibility: SqlAccessibilityService,
-        message: String
-    ): Boolean {
+    private suspend fun deliverLive(message: String): Boolean {
         val context = SqlAiApp.instance
         val liveSettings = try {
             SqlAiApp.settings.settings.first()
@@ -466,11 +464,9 @@ object WhatsAppCallAutomationHandler {
                         LogLevel.WARN
                     )
                 }
-                // Stay in the call so the recipient can answer back - abort
-                // the moment the call really ends (no post-call speech).
-                // G5: 15s reply window only - the agent must get control
-                // back fast ("call laga kar baithak jata hai" was this hold).
-                holdUntilCallEnds(accessibility, maxMs = 15_000)
+                // v6.0: NO fixed reply window here - deliverLive returns
+                // immediately and placeCall starts the autonomous bridge,
+                // which owns the conversation until the call ends.
             } else {
                 LogBus.log(
                     "[WA-CALL] all route attempts FAILED " +
@@ -487,33 +483,6 @@ object WhatsAppCallAutomationHandler {
         return delivered
     }
 
-    /**
-     * G2 - poll until the call visibly ends (or [maxMs] passes) while the
-     * duplex session stays live. 12s grace so mid-playback screens are not
-     * misread as "no call UI".
-     */
-    private suspend fun holdUntilCallEnds(accessibility: SqlAccessibilityService, maxMs: Long) {
-        val start = System.currentTimeMillis()
-        val until = start + maxMs
-        while (System.currentTimeMillis() < until) {
-            delay(1500)
-            if (CallStateMachine.current() == CallStateMachine.State.ENDED) break
-            val screen = accessibility.captureScreenText(60).lowercase()
-            if (screen.contains("call ended") ||
-                screen.contains("call rejected") ||
-                screen.contains("call failed") ||
-                screen.contains("no answer")
-            ) break
-            if (System.currentTimeMillis() - start > 12_000) {
-                val hasCallUi = screen.contains(Regex("\\d:\\d{2}")) ||
-                    screen.contains("speaker") ||
-                    screen.contains("mute") ||
-                    screen.contains("end call") ||
-                    screen.contains("message")
-                if (!hasCallUi) break
-            }
-        }
-    }
 
     /** True while the background mic capture of this handler is active. */
     fun isLiveTalking(): Boolean = GeminiLiveAudioEngine.state.value ==
