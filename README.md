@@ -9,12 +9,50 @@ taps, swipes and typing for you.
 | | |
 |---|---|
 | Repository | `Jarvis-AI` |
-| App name | **SQL AI v5.0 Ultimate Agent** (dynamic, version-stamped) |
+| App name | **SQL AI v5.1 Ultimate Agent** (dynamic, version-stamped) |
 | Package | `com.sqlai.assistant` |
 | Language | Kotlin + Jetpack Compose |
 | Min SDK | 26 (Android 8.0) |
 | Target SDK | 34 (Android 14), compiled against 35 |
 | License | MIT |
+
+---
+
+## What's new in v5.1
+
+Real-world call-test feedback (v5.0.1) fixed - the WhatsApp call task used to
+speak the message AFTER the call ended, restart from step 1 mid-task and freeze
+until a force-stop. v5.1 rewrites the call + task lifecycle:
+
+- **Call State Machine (BUG #1 / FEATURE #3)** - `CallStateMachine.kt` tracks
+  `IDLE -> DIALING -> RINGING -> CONNECTED -> SPEAKING -> ENDED`. The spoken
+  message is delivered ONLY in CONNECTED (2 s settle delay + re-verify), TTS is
+  suppressed in every other state, the speaker queue is dropped for the whole
+  call session and flushed on ENDED - nothing can play after the call ends.
+  `wa_call` now blocks outside the step watchdog, rethrows cancellation and
+  never swallows it (no zombie workflows).
+- **Persistent task state - no more restart loops (BUG #2 / BUG #5)** -
+  `TaskStateManager.kt` persists completed milestones to SharedPreferences.
+  Every think() receives `COMPLETED (never redo) / STILL REMAINING`; the model
+  sets a `milestone` field when a micro-goal verifies, and timeout feedback
+  explicitly forbids navigating back to step 1. State survives call
+  interruptions, service restarts and process death.
+- **15-second step watchdog + self-healing (BUG #3 / FEATURE #1)** - normal
+  steps time out at 15 s, long workflows (`wa_call`, `wait_for`) at 90 s.
+  On every stall: screenshot -> `BlockerSweeper.recover()` auto-dismisses
+  permission / crash / ANR / battery dialogs (positive buttons only) -> BACK
+  only if still stuck. The app no longer needs force-stopping.
+- **Priority element detection (BUG #4)** - `findBestMatch()` scores
+  content-description (96) > view-id (94) > exact text (92) > contains (84/80)
+  > fuzzy similarity (<=76) with confidence logging; matches below 55 are
+  rejected instead of tapping garbage.
+- **Step screenshot log (FEATURE #2)** - after every action and every
+  timeout the screen is saved as `Step_N_Label.png` (rolling 20,
+  `filesDir/step_logs`).
+- **Intelligent contact matching (FEATURE #4)** - `ContactMatcher.kt` scores
+  every clickable row (exact / first-name / all-words / Levenshtein) and the
+  chosen row + score + reason is logged, e.g.
+  `selected 'Mohan Sharma' score=100 (exact match)`.
 
 ---
 

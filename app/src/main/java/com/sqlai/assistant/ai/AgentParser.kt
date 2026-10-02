@@ -12,7 +12,9 @@ data class AgentPlan(
     val done: Boolean,
     val actions: List<Action>,
     val expectType: String,   // text_visible | app_foreground | none
-    val expectValue: String
+    val expectValue: String,
+    /** BUG #2: label of the micro-goal completed by this step (persisted). */
+    val milestone: String = ""
 )
 
 object AgentParser {
@@ -40,7 +42,8 @@ object AgentParser {
                 done = obj.optBoolean("done", false),
                 actions = PlanParser.parseActions(obj),
                 expectType = expect?.optString("type")?.lowercase()?.ifBlank { "none" } ?: "none",
-                expectValue = expect?.optString("value").orEmpty()
+                expectValue = expect?.optString("value").orEmpty(),
+                milestone = obj.optString("milestone").trim()
             )
         } catch (e: Exception) {
             AgentPlan(
@@ -49,7 +52,8 @@ object AgentParser {
                 done = false,
                 actions = emptyList(),
                 expectType = "none",
-                expectValue = ""
+                expectValue = "",
+                milestone = ""
             )
         }
     }

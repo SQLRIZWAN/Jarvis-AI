@@ -9,8 +9,11 @@ import com.sqlai.assistant.core.AssistantState
 import com.sqlai.assistant.core.CorePromptBuilder
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
+import com.sqlai.assistant.core.ScreenshotLog
 import com.sqlai.assistant.core.StateBus
+import com.sqlai.assistant.core.TaskStateManager
 import com.sqlai.assistant.device.DeviceController
+import com.sqlai.assistant.service.BlockerSweeper
 import com.sqlai.assistant.service.SqlAccessibilityService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -50,7 +53,9 @@ import java.io.ByteArrayOutputStream
  */
 object SQLAgentCoreV5 {
 
-    private const val STEP_TIMEOUT_MS = 5_000L
+    private const val STEP_TIMEOUT_MS = 15_000L // BUG #3: 15s per-step watchdog
+    private const val LONG_STEP_TIMEOUT_MS = 90_000L // wa_call / wait_for workflows
+    private val LONG_ACTIONS = setOf("wa_call", "call", "wait_for")
     private const val NO_PROGRESS_LIMIT = 20
     private const val AI_ERROR_LIMIT = 3
     private const val STATE_REFRESH_MS = 6_000L
@@ -87,16 +92,27 @@ object SQLAgentCoreV5 {
 
         lastStateRefresh = 0L
         LogBus.log("[$source] V5 agent started: \"$task\"", LogLevel.SUCCESS)
+        ScreenshotLog.nextTask()
         val conversation = ArrayList<ChatMessage>()
         conversation.add(ChatMessage("user", "TASK: $task"))
 
         // ------------------------------------------- PHASE 0: decompose goal
         val subgoals = decomposeGoal(settings, task)
+        // BUG #2 / BUG #5: persistent task state - resumes instead of restarting.
+        val taskState = TaskStateManager.begin(SqlAiApp.instance, task, subgoals)
         if (subgoals.isNotEmpty()) {
             val numbered = subgoals.mapIndexed { i, g -> "${i + 1}. $g" }.joinToString("\n")
             LogBus.log("Goal split into ${subgoals.size} micro-goals", LogLevel.SUCCESS)
             conversation.add(ChatMessage("user", "MICRO-GOAL PLAN (follow in order):\n$numbered"))
-            announce(subgoals.first())
+        }
+        if (taskState.completed.isNotEmpty()) {
+            conversation.add(ChatMessage("user", TaskStateManager.stateBlock()))
+            LogBus.log(
+                "[TASK] resuming: ${taskState.completed.size} milestone(s) already done",
+                LogLevel.WARN
+            )
+        } else {
+            subgoals.firstOrNull()?.let { announce(it) }
         }
 
         var lastReply = ""
@@ -128,10 +144,11 @@ object SQLAgentCoreV5 {
                 (step == 1 || !previousVerifyOk || softStuck || usedCoordinateTap)
             val image = if (needImage) captureJpeg(accessibility) else null
 
-            val observation = if (step == 1) {
-                "TASK: $task\n\nLIVE SCREEN:\n$screen"
-            } else {
-                "AFTER MY LAST ACTIONS the screen is now:\n$screen"
+            val stateBlock = TaskStateManager.stateBlock()
+            val observation = buildString {
+                if (step == 1) append("TASK: $task\n\n") else append("AFTER MY LAST ACTIONS the screen is now:\n")
+                if (stateBlock.isNotBlank()) append(stateBlock).append("\n\n")
+                append("LIVE SCREEN:\n").append(screen)
             }
             conversation.add(ChatMessage("user", observation))
             trim(conversation)
@@ -167,14 +184,21 @@ object SQLAgentCoreV5 {
                 announce(plan.reply) // live progress - non-blocking speech queue
             }
 
-            // ---- ACT (hard 5 s timeout - NEVER freeezes) ------------------
+            // ---- ACT (15 s watchdog - NEVER freezes; long actions get more)
             var timedOut = false
             var delta = false
             val actions = plan.actions
             if (actions.isNotEmpty()) {
                 LogBus.log("Act #$step: ${actions.size} action(s)", LogLevel.INFO)
                 usedCoordinateTap = actions.any { it.type == "tap" && it.x != null }
-                val outcome = withTimeoutOrNull(STEP_TIMEOUT_MS) {
+                // FEATURE #1: dismiss permission / crash / battery dialogs first.
+                if (softStuck || step % 3 == 1) {
+                    BlockerSweeper.sweep(accessibility, screen)
+                }
+                val budgetMs =
+                    if (actions.any { it.type in LONG_ACTIONS }) LONG_STEP_TIMEOUT_MS
+                    else STEP_TIMEOUT_MS
+                val outcome = withTimeoutOrNull(budgetMs) {
                     withContext(Dispatchers.IO) {
                         DeviceController.execute(actions)
                     }
@@ -188,14 +212,18 @@ object SQLAgentCoreV5 {
                     stuckStreak++
                     noProgressStreak++
                     LogBus.log(
-                        "Step #$step TIMED OUT after ${STEP_TIMEOUT_MS}ms - soft failure #$stuckStreak, recovering",
+                        "Step #$step TIMED OUT after ${budgetMs}ms - soft failure #$stuckStreak, recovering",
                         LogLevel.WARN
                     )
+                    // FEATURE #2: keep a screenshot of every blocked step.
+                    ScreenshotLog.captureAndSave("Step_${step}_TIMEOUT")
+                    // FEATURE #1: auto-dismiss the blocker that froze the step.
+                    val healed = BlockerSweeper.recover(accessibility)
                     if (stuckStreak == 2) {
                         announce("That step stalled - trying another way")
                     }
                     // Escape hatch: press BACK out of dead-ends/dialogs.
-                    if (stuckStreak % BACK_EVERY_N_STUCK == 0) {
+                    if (!healed && stuckStreak % BACK_EVERY_N_STUCK == 0) {
                         withContext(Dispatchers.IO) {
                             accessibility.globalBack()
                             delay(400)
@@ -212,6 +240,8 @@ object SQLAgentCoreV5 {
                     } else {
                         noProgressStreak = 0
                     }
+                    // FEATURE #2: screenshot after every action batch.
+                    ScreenshotLog.captureAndSave("Step_${step}_${actions.first().type}")
                 }
             } else {
                 noProgressStreak = if (plan.done) noProgressStreak else 0
@@ -222,9 +252,16 @@ object SQLAgentCoreV5 {
                 verify(accessibility, plan.expectType, plan.expectValue)
             previousVerifyOk = verifyOk
 
+            // BUG #2: persist the completed milestone so restarts / calls
+            // never make the model redo it.
+            if (verifyOk && plan.milestone.isNotBlank()) {
+                TaskStateManager.markCompleted(SqlAiApp.instance, plan.milestone)
+            }
+
             if (plan.done) {
                 if (verifyOk || plan.expectType == "none") {
                     completed = true
+                    TaskStateManager.clear(SqlAiApp.instance)
                     LogBus.log("Task COMPLETE after $step step(s): $task", LogLevel.SUCCESS)
                     if (lastReply.isBlank()) Speaker.post("Task completed.")
                     break
@@ -233,6 +270,7 @@ object SQLAgentCoreV5 {
             }
 
             if (noProgressStreak >= NO_PROGRESS_LIMIT) {
+                TaskStateManager.clear(SqlAiApp.instance)
                 LogBus.log("Agent stopped: no progress after $NO_PROGRESS_LIMIT attempts", LogLevel.WARN)
                 Speaker.post("I could not complete that task.")
                 break
@@ -242,18 +280,20 @@ object SQLAgentCoreV5 {
             val freshScreen = withContext(Dispatchers.IO) {
                 accessibility.captureScreenDetailed(70)
             }
-            val feedback = when {
+            val core = when {
                 timedOut ->
-                    "TIMEOUT: your actions produced no valid UI change within 5 seconds. " +
-                        "The screen was re-parsed fresh. Do NOT repeat the same action - " +
-                        "take an ALTERNATE path (different button label, exact pixel tap " +
-                        "{x,y} from the screenshot, or navigate from the start). " +
+                    "TIMEOUT: your actions produced no valid UI change within the step watchdog. " +
+                        "The screen was re-parsed fresh and any blocking dialog was dismissed. " +
+                        "Do NOT repeat the same action and do NOT restart from step 1 - resume " +
+                        "from your CURRENT position and take an ALTERNATE path (different button " +
+                        "label, exact pixel tap {x,y} from the screenshot, BACK once). " +
                         "Current screen:\n$freshScreen"
 
                 plan.actions.isNotEmpty() && !delta ->
                     "NO UI CHANGE detected after your actions (stalled $stuckStreak time(s)). " +
-                        "Analyse the screenshot coordinates and switch to a DIFFERENT control " +
-                        "(icon, content-description or pixel tap). Current screen:\n$freshScreen"
+                        "Element matching may have failed - scroll, wait 1s, or re-scan, then " +
+                        "switch to a DIFFERENT control (icon, content-description or pixel tap). " +
+                        "Do NOT redo completed milestones. Current screen:\n$freshScreen"
 
                 plan.expectType == "none" || plan.expectValue.isBlank() ->
                     "No verification requested. Current screen:\n$freshScreen"
@@ -262,16 +302,21 @@ object SQLAgentCoreV5 {
                     "VERIFIED: \"${plan.expectValue}\" is visible. Continue the remaining task. Current screen:\n$freshScreen"
 
                 else ->
-                    "VERIFY FAILED: expected \"${plan.expectValue}\" was NOT found. Analyse why " +
-                        "and retry differently. Current screen:\n$freshScreen"
+                    "VERIFY FAILED: expected \"${plan.expectValue}\" was NOT found. The element " +
+                        "may need scrolling/waiting or a different label (content-description " +
+                        "first, then exact text, then coordinates). Do NOT restart the task. " +
+                        "Current screen:\n$freshScreen"
             }
-            conversation.add(ChatMessage("user", feedback))
+            val stateLine = TaskStateManager.stateBlock()
+            conversation.add(
+                ChatMessage("user", if (stateLine.isBlank()) core else "$stateLine\n\n$core")
+            )
             trim(conversation)
             refreshState(task, force = false)
         }
 
         StateBus.setState(AssistantState.IDLE)
-        if (shouldStop()) LogBus.log("Agent stopped by user", LogLevel.WARN)
+        if (shouldStop()) LogBus.log("Agent stopped by user (task state kept for resume)", LogLevel.WARN)
         if (completed) {
             stuckStreak = 0
         }

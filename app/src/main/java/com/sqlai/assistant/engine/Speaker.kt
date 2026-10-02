@@ -62,9 +62,15 @@ object Speaker {
      * Serialized speech queue (Loop A of the dual-loop agent): producers call
      * [post] and return immediately so the task executor never blocks on TTS /
      * Gemini Live round-trips. Order is preserved, no overlapping utterances.
+     *
+     * BUG #1 / FEATURE #3: every entry carries the epoch it was posted under.
+     * [flushQueued] bumps the epoch so anything queued BEFORE a call ended is
+     * dropped (never plays after the call). While a call session is active the
+     * consumer drops texts instead of speaking them on the normal speaker.
      */
     private val speechScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val speechQueue = Channel<String>(capacity = 64)
+    private val speechQueue = Channel<Pair<Int, String>>(capacity = 64)
+    @Volatile private var queueEpoch = 0
     @Volatile private var consumerStarted = false
 
     /**
@@ -74,8 +80,13 @@ object Speaker {
      */
     fun post(text: String) {
         if (text.isBlank()) return
-        speechQueue.trySend(text)
+        speechQueue.trySend(queueEpoch to text)
         startQueueConsumer()
+    }
+
+    /** Drop everything still queued (call ended / task reset). */
+    fun flushQueued() {
+        queueEpoch++
     }
 
     /** True while something is being spoken (TTS or Gemini Live). */
@@ -103,7 +114,14 @@ object Speaker {
             if (consumerStarted) return
             consumerStarted = true
             speechScope.launch {
-                for (text in speechQueue) {
+                for ((epoch, text) in speechQueue) {
+                    if (epoch != queueEpoch) continue // flushed - never play
+                    // FEATURE #3: no speaker output while a call session is
+                    // in progress (DIALING/RINGING/CONNECTED/SPEAKING).
+                    if (com.sqlai.assistant.service.CallStateMachine.isCallActive()) {
+                        LogBus.log("[Speaker] dropped during call: \"$text\"", LogLevel.DEBUG)
+                        continue
+                    }
                     try {
                         speak(text)
                     } catch (e: Exception) {

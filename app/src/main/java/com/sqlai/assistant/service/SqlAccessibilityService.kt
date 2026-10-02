@@ -228,28 +228,70 @@ class SqlAccessibilityService : AccessibilityService() {
         return dispatch(path, durationMs.coerceIn(50, 5000).toLong())
     }
 
+    /** Result of BUG #4 priority element detection. */
+    data class NodeMatch(
+        val node: AccessibilityNodeInfo,
+        val confidence: Int,
+        val via: String
+    )
+
     /**
-     * Find a node whose text/description matches [label] and click it.
-     * Falls back to a coordinate tap at the node's centre.
+     * BUG #4 - detect screen elements with an explicit priority chain:
+     *   contentDescription (exact) > view-id (exact) > text (exact) >
+     *   contentDescription (contains) > text (contains) > fuzzy similarity.
+     * Returns the best match with a confidence score (0..100).
+     */
+    fun findBestMatch(label: String): NodeMatch? {
+        val root = try { rootInActiveWindow } catch (e: Exception) { null } ?: return null
+        val needle = label.trim().lowercase()
+        if (needle.isEmpty()) return null
+
+        var best: NodeMatch? = null
+        fun offer(node: AccessibilityNodeInfo, confidence: Int, via: String) {
+            if (confidence > (best?.confidence ?: -1)) best = NodeMatch(node, confidence, via)
+        }
+
+        fun walk(node: AccessibilityNodeInfo, depth: Int) {
+            if (depth > 25) return
+            val text = node.text?.toString()?.trim()
+            val desc = node.contentDescription?.toString()?.trim()
+            val viewId = node.viewIdResourceName?.substringAfterLast('/')
+
+            if (desc != null && desc.equals(label, true)) offer(node, 96, "content-desc exact")
+            if (viewId != null && viewId.equals(label, true)) offer(node, 94, "view-id exact")
+            if (text != null && text.equals(label, true)) offer(node, 92, "text exact")
+            if (desc != null && desc.lowercase().contains(needle)) offer(node, 84, "content-desc contains")
+            if (text != null && text.lowercase().contains(needle)) offer(node, 80, "text contains")
+            // Fuzzy fallback (>=0.60 similarity only, capped below contains).
+            val probe = (text ?: desc ?: "").lowercase()
+            val sim = com.sqlai.assistant.device.ContactMatcher.similarity(needle, probe)
+            if (sim >= 0.60) {
+                val base = if (desc != null) 78 else 74
+                offer(node, minOf(76, (sim * base).toInt()), "fuzzy ${"%.2f".format(sim)}")
+            }
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                walk(child, depth + 1)
+            }
+        }
+        walk(root, 0)
+        return best
+    }
+
+    /**
+     * Click the best-priority match for [label]. Returns false only when the
+     * match is missing or confidence is below the hard floor (55) - callers
+     * then scroll / wait / re-scan instead of tapping garbage.
      */
     suspend fun clickText(label: String): Boolean {
-        val root = try {
-            rootInActiveWindow
-        } catch (e: Exception) {
-            null
-        } ?: return false
+        val match = findBestMatch(label) ?: return false
+        com.sqlai.assistant.core.LogBus.log(
+            "[MATCH] '$label' conf=${match.confidence} via=${match.via}",
+            com.sqlai.assistant.core.LogLevel.DEBUG
+        )
+        if (match.confidence < 55) return false
 
-        val needle = label.trim().lowercase()
-        if (needle.isEmpty()) return false
-
-        val matches = mutableListOf<AccessibilityNodeInfo>()
-        collectMatches(root, needle, matches, 0)
-        if (matches.isEmpty()) return false
-
-        // Prefer exact match, then anything clickable.
-        val exact = matches.firstOrNull { it.text?.toString().equals(label, true) }
-        val node = exact ?: matches.first()
-
+        val node = match.node
         var clickable: AccessibilityNodeInfo? = node
         while (clickable != null && !clickable.isClickable) {
             clickable = clickable.parent
@@ -269,26 +311,39 @@ class SqlAccessibilityService : AccessibilityService() {
         return tap(rect.centerX(), rect.centerY())
     }
 
-    private fun collectMatches(
-        node: AccessibilityNodeInfo,
-        needle: String,
-        out: MutableList<AccessibilityNodeInfo>,
-        depth: Int
-    ) {
-        if (depth > 25 || out.size >= 30) return
-        val text = node.text?.toString()?.lowercase()
-        val desc = node.contentDescription?.toString()?.lowercase()
-        val hit = (text != null && text.contains(needle)) || (desc != null && desc.contains(needle))
-        if (hit) out.add(node)
-        for (i in 0 until node.childCount) {
-            val child = try {
-                node.getChild(i)
-            } catch (e: Exception) {
-                null
-            } ?: continue
-            collectMatches(child, needle, out, depth + 1)
+    /**
+     * FEATURE 4 - list every clickable row's visible label on screen, so the
+     * contact matcher can score candidates instead of blind first-match taps.
+     */
+    fun collectClickableTexts(maxItems: Int = 40): List<String> {
+        val root = try { rootInActiveWindow } catch (e: Exception) { null } ?: return emptyList()
+        val out = linkedSetOf<String>()
+
+        fun walk(node: AccessibilityNodeInfo, depth: Int) {
+            if (depth > 25 || out.size >= maxItems) return
+            var clickable: AccessibilityNodeInfo? = node
+            var isRow = false
+            var hops = 0
+            while (clickable != null && hops < 6) {
+                if (clickable.isClickable) { isRow = true; break }
+                clickable = clickable.parent
+                hops++
+            }
+            if (isRow) {
+                val text = node.text?.toString()?.trim()
+                val desc = node.contentDescription?.toString()?.trim()
+                text?.takeIf { it.isNotBlank() && it.length in 2..60 }?.let { out.add(it) }
+                desc?.takeIf { it.isNotBlank() && it.length in 2..60 && it != text }?.let { out.add(it) }
+            }
+            for (i in 0 until node.childCount) {
+                val child = try { node.getChild(i) } catch (e: Exception) { null } ?: continue
+                walk(child, depth + 1)
+            }
         }
+        walk(root, 0)
+        return out.toList()
     }
+
 
     // ----------------------------------------------------------------- typing
 

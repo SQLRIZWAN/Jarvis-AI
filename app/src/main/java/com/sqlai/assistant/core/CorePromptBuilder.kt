@@ -64,6 +64,7 @@ object CorePromptBuilder {
           "thought": "<your analysis of the current screen and next move>",
           "reply": "<very short spoken status, max 12 words>",
           "done": false,
+          "milestone": "<micro-goal label completed by THIS step, or empty>",
           "actions": [ ...same action schema as before... ],
           "expect": {"type": "text_visible", "value": "Followers"}
         }
@@ -74,6 +75,9 @@ object CorePromptBuilder {
           - actions: the NEXT step only (1-3 actions), never the whole plan at once.
           - expect: what must be visible AFTER the actions run so you can verify progress.
             types: "text_visible" {value}, "app_foreground" {value = package name}, "none".
+          - milestone: when this step finishes one of the MICRO-GOAL PLAN items or the
+            TASK STATE "REMAINING" list, copy that label into "milestone" (exact text).
+            It is persisted - completed milestones are shown back to you every turn.
 
         VISUAL GROUNDING (v5): when the turn includes a screenshot IMAGE, use it as
         your eyes: locate the target element in the image and compute its EXACT pixel
@@ -95,12 +99,20 @@ object CorePromptBuilder {
 
         Hard rules:
           - THINK FIRST: before acting, name the micro-goal you are completing this step.
+          - TASK STATE: the turn may include "COMPLETED (never redo these)" and
+            "STILL REMAINING". NEVER restart the task from the beginning and NEVER redo
+            a completed milestone - always resume from the FIRST remaining item.
           - Use tap_text when the exact label is on screen; otherwise GROUND your tap in
             the screenshot with pixel coordinates. Never guess blind coordinates without
             having seen the image this turn.
+          - ELEMENT MATCHING: prefer content-description, then exact visible text, then
+            pixel coordinates. If verification fails because the element was not found,
+            SCROLL, WAIT, or RE-SCAN the screen - never tap a low-confidence near-match
+            and never restart the whole task over a single failed tap.
           - Every step must define "expect" - no action without visual verification.
           - If the feedback says TIMEOUT / NO UI CHANGE, do NOT repeat the same action:
-            switch to an ALTERNATE path (other button, pixel tap from image, BACK, reopen).
+            switch to an ALTERNATE path (other button, pixel tap from image, BACK, reopen)
+            from your CURRENT position - do NOT navigate all the way back to step 1.
           - If an action failed or expect did not verify, analyse the NEW screen and retry
             with a different approach (back, reopen, other button label).
           - For "like my latest reel": open app -> Profile tab -> first/latest reel -> tap the
@@ -111,7 +123,10 @@ object CorePromptBuilder {
             ("Opening WhatsApp now...", "Searching for Mohan...", "Placing the call...").
             Never repeat the same line twice; never stay silent for more than 2 steps.
           - WhatsApp calling: use wa_call with the on-screen contact name and put the
-            exact sentence the user wants delivered into "message".
+            exact sentence the user wants delivered into "message". wa_call BLOCKS until
+            the call ends - the message is spoken ON the call automatically. When it
+            returns, the call is over: mark its milestone done and continue only the
+            REMAINING milestones (never re-open WhatsApp or re-dial).
           - speak says any single line aloud without performing other actions.
           - When done, set done=true with empty actions and a final reply.
           - Keep going until the task is 100% complete; never give up after a fixed number of steps.
