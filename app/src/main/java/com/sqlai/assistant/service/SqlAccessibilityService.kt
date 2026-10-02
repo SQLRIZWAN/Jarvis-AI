@@ -52,6 +52,11 @@ class SqlAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     override fun onDestroy() {
+        try {
+            shotExecutor.shutdown()
+        } catch (t: Throwable) {
+        }
+        cachedShot = null
         if (instance === this) instance = null
         LogBus.log("Accessibility service destroyed", LogLevel.WARN)
         super.onDestroy()
@@ -164,19 +169,39 @@ class SqlAccessibilityService : AccessibilityService() {
     // ------------------------------------------------------------ screenshot
 
     /**
-     * Full screen capture through the accessibility API (no MediaProjection
-     * permission needed). API 30+; returns null on older devices.
+     * G1 CRASH FIX - full screen capture through the accessibility API (no
+     * MediaProjection permission needed). API 30+; returns null on older devices.
+     *
+     * - ONE shared daemon executor (the old code spawned a new
+     *   single-thread executor per capture and never shut it down -> one
+     *   leaked thread per screenshot -> hundreds of live threads per task
+     *   -> native OOM crash mid-task).
+     * - 800 ms frame cache: back-to-back callers get the SAME frame, so a
+     *   task can never fire bursts of captures ("200 screenshots/sec").
+     * - Ownership: the returned bitmap is SERVICE-OWNED. Callers must
+     *   NEVER recycle() it - it may be handed to other callers too.
+     * - OutOfMemoryError during the ARGB copy is caught -> null, no crash.
      */
-    suspend fun captureScreenshot(): android.graphics.Bitmap? {
+    private val shotExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "sqlai-shot").apply { isDaemon = true }
+        }
+    @Volatile private var cachedShot: android.graphics.Bitmap? = null
+    @Volatile private var cachedShotAt = 0L
+    private val shotLock = Any()
+
+    suspend fun captureScreenshot(minIntervalMs: Long = 800): android.graphics.Bitmap? {
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return null
+        cachedShot?.let { hot ->
+            if (!hot.isRecycled && android.os.SystemClock.elapsedRealtime() - cachedShotAt < minIntervalMs) {
+                return hot
+            }
+        }
         return kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
             try {
-                val executor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-                    Thread(r, "sqlai-shot").apply { isDaemon = true }
-                }
                 takeScreenshot(
                     android.view.Display.DEFAULT_DISPLAY,
-                    executor,
+                    shotExecutor,
                     object : TakeScreenshotCallback {
                         override fun onSuccess(screenshot: ScreenshotResult) {
                             var result: android.graphics.Bitmap? = null
@@ -194,8 +219,17 @@ class SqlAccessibilityService : AccessibilityService() {
                                     }
                                 }
                                 buffer?.close()
-                            } catch (e: Exception) {
-                                Log.w(TAG, "screenshot convert failed", e)
+                            } catch (t: Throwable) {
+                                Log.w(TAG, "screenshot convert failed: $t")
+                            }
+                            // Publish to the frame cache BEFORE resume so an
+                            // abandoned (timed-out) capture still serves the
+                            // next caller instead of leaking unrecycled.
+                            if (result != null) {
+                                synchronized(shotLock) {
+                                    cachedShot = result
+                                    cachedShotAt = android.os.SystemClock.elapsedRealtime()
+                                }
                             }
                             if (continuation.isActive) continuation.resume(result)
                         }
@@ -205,7 +239,8 @@ class SqlAccessibilityService : AccessibilityService() {
                         }
                     }
                 )
-            } catch (e: Exception) {
+            } catch (t: Throwable) {
+                Log.w(TAG, "screenshot dispatch failed: $t")
                 if (continuation.isActive) continuation.resume(null)
             }
         }

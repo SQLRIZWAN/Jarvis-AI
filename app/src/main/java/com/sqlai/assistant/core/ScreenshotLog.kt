@@ -19,30 +19,43 @@ object ScreenshotLog {
     private const val DIR = "step_logs"
     private const val MAX_KEPT = 20
 
-    @Volatile private var counter = 0
+    private var counter = 0
 
     /** Reset counter at task start so names read Step_1..Step_N. */
+    @Synchronized
     fun nextTask() {
         counter = 0
     }
 
     /**
-     * Save [bitmap] as Step_<n>_<label>.png. Never throws - this is a
-     * diagnostics aid, not a task-critical path.
+     * G1 CRASH FIX - save [bitmap] as Step_<n>_<label>.jpg:
+     *  - downscaled to max 720px wide + JPEG q70 (was full-res PNG q100:
+     *    ~10-18MB ARGB encode per step -> heap OOM mid-task),
+     *  - Throwable caught (OutOfMemoryError is NOT an Exception),
+     *  - synchronized counter (no filename races),
+     *  - bitmap is service-owned: never recycled here.
      */
+    @Synchronized
     fun save(bitmap: Bitmap?, label: String) {
-        if (bitmap == null) return
+        if (bitmap == null || bitmap.isRecycled) return
         try {
             val n = ++counter
             val dir = File(SqlAiApp.instance.filesDir, DIR)
             if (!dir.exists()) dir.mkdirs()
             val safe = label.replace(Regex("[^A-Za-z0-9_]+"), "_").take(40)
-            val file = File(dir, "Step_${n}_${safe}.png")
-            file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            val file = File(dir, "Step_${n}_${safe}.jpg")
+            var out: Bitmap = bitmap
+            val maxW = 720
+            if (bitmap.width > maxW) {
+                val h = (bitmap.height.toLong() * maxW / bitmap.width).toInt().coerceAtLeast(1)
+                out = Bitmap.createScaledBitmap(bitmap, maxW, h, false)
+            }
+            file.outputStream().use { out.compress(Bitmap.CompressFormat.JPEG, 70, it) }
+            if (out !== bitmap) out.recycle()
             trim(dir)
             LogBus.log("[SHOTS] ${file.name}", LogLevel.INFO)
-        } catch (e: Exception) {
-            Log.w(TAG, "save failed", e)
+        } catch (t: Throwable) {
+            Log.w(TAG, "save failed: $t")
         }
     }
 
@@ -52,8 +65,8 @@ object ScreenshotLog {
             val a11y = com.sqlai.assistant.service.SqlAccessibilityService.instance
             val shot = a11y?.captureScreenshot()
             save(shot, label)
-        } catch (e: Exception) {
-            Log.w(TAG, "capture failed", e)
+        } catch (t: Throwable) {
+            Log.w(TAG, "capture failed: $t")
         }
     }
 

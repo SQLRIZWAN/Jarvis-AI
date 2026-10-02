@@ -225,7 +225,6 @@ object AgenticLoopEngine {
         return try {
             val stream = ByteArrayOutputStream()
             bitmap.compress(Bitmap.CompressFormat.JPEG, 65, stream)
-            bitmap.recycle()
             stream.toByteArray()
         } catch (e: Exception) {
             null

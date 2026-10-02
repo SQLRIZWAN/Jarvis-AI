@@ -61,8 +61,10 @@ object PlanParser {
                     type = type,
                     app = a.optStringOrNull("app") ?: a.optStringOrNull("package"),
                     text = a.optStringOrNull("text") ?: a.optStringOrNull("message"),
-                    x = a.optIntOrNull("x"),
-                    y = a.optIntOrNull("y"),
+                    // G1: prompt documents swipe {x1,y1,x2,y2} but the model's
+                    // x1/y1 were dropped -> swipe silently did nothing.
+                    x = a.optIntOrNull("x") ?: a.optIntOrNull("x1"),
+                    y = a.optIntOrNull("y") ?: a.optIntOrNull("y1"),
                     x2 = a.optIntOrNull("x2"),
                     y2 = a.optIntOrNull("y2"),
                     durationMs = a.optIntOrNull("duration_ms") ?: a.optIntOrNull("duration"),

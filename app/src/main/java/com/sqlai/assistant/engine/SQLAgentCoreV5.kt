@@ -244,8 +244,11 @@ object SQLAgentCoreV5 {
                     } else {
                         noProgressStreak = 0
                     }
-                    // FEATURE #2: screenshot after every action batch.
-                    ScreenshotLog.captureAndSave("Step_${step}_${actions.first().type}")
+                    // G1: save a step screenshot ONLY on failure - successful
+                    // steps skip it (2 captures/step -> 1/step; timeouts keep theirs).
+                    if (!delta || stuckStreak > 0) {
+                        ScreenshotLog.captureAndSave("Step_${step}_${actions.first().type}")
+                    }
                 }
             } else {
                 noProgressStreak = if (plan.done) noProgressStreak else 0
@@ -424,9 +427,9 @@ object SQLAgentCoreV5 {
         return try {
             val stream = ByteArrayOutputStream()
             bitmap.compress(Bitmap.CompressFormat.JPEG, 65, stream)
-            bitmap.recycle()
+            // G1: do NOT recycle - the frame is service-owned (shared cache).
             stream.toByteArray()
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
             null
         }
     }
