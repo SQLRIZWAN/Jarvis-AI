@@ -421,6 +421,51 @@ object Speaker {
         }
     }
 
+    /**
+     * G5 - deterministic Android TTS start for voice-note recording.
+     * Bypasses the Gemini routes (websocket round-trip / silent failure ->
+     * WhatsApp records EMPTY audio) and forces USAGE_MEDIA so the mic
+     * definitely picks it up. Returns true when playback actually started.
+     */
+    suspend fun speakForHold(text: String): Boolean {
+        if (text.isBlank()) return false
+        if (tts == null) {
+            try {
+                init(SqlAiApp.instance)
+            } catch (e: Exception) {
+                LogBus.log("TTS init error: ${e.message}", LogLevel.WARN)
+            }
+        }
+        val settings = try {
+            SqlAiApp.settings.settings.first()
+        } catch (e: Exception) {
+            com.sqlai.assistant.core.AppSettings()
+        }
+        val engine = awaitReady(4000) ?: run {
+            LogBus.log("[VOICE-NOTE] TTS not ready - nothing to speak", LogLevel.WARN)
+            return false
+        }
+        return try {
+            engine.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            applyVoiceSettings(engine, settings)
+            engine.setSpeechRate(settings.ttsSpeed)
+            val started = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "hold-${nextId()}")
+            LogBus.log(
+                "[VOICE-NOTE] speakForHold ${if (started == TextToSpeech.SUCCESS) "STARTED" else "FAILED($started)"}",
+                if (started == TextToSpeech.SUCCESS) LogLevel.SUCCESS else LogLevel.WARN
+            )
+            started == TextToSpeech.SUCCESS
+        } catch (t: Throwable) {
+            Log.w(TAG, "speakForHold failed", t)
+            false
+        }
+    }
+
     // ----------------------------------------------------------------- voice
 
     /** Picks locale + closest gender voice + pitch factor. */

@@ -134,6 +134,10 @@ object CorePromptBuilder {
             On EACH step give a short, distinct progress line in the user's language
             ("Opening WhatsApp now...", "Searching for Mohan...", "Placing the call...").
             Never repeat the same line twice; never stay silent for more than 2 steps.
+          - The screen dump + screenshot you receive are CURRENT - act on them
+            immediately. Do NOT re-read, re-verify, or re-open what is already
+            visible or confirmed, and NEVER redo a completed milestone. Forward
+            motion only: 1-3 actions per step, no idle re-observation turns.
           - VOICE NOTE: voice_note {text, ms} presses-and-holds the mic so WhatsApp
             records a real voice note. For "voice message"/"voice note" requests use
             ONLY this - never type_text (it would send TEXT). Chat open + box EMPTY

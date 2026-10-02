@@ -190,6 +190,15 @@ class SqlAccessibilityService : AccessibilityService() {
     @Volatile private var cachedShotAt = 0L
     private val shotLock = Any()
 
+    /**
+     * G5 - force the NEXT capture to be a REAL capture. Called after every
+     * action batch: without it the 800ms frame cache fed the model PRE-action
+     * pixels ("agent peeche soch raha hai" - acting on stale screens).
+     */
+    fun invalidateShotCache() {
+        cachedShotAt = 0L
+    }
+
     suspend fun captureScreenshot(minIntervalMs: Long = 800): android.graphics.Bitmap? {
         if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return null
         cachedShot?.let { hot ->

@@ -208,6 +208,9 @@ object SQLAgentCoreV5 {
                     }
                     // Short settle so animations commit before we compare.
                     delay(250)
+                    // G5: the screen CHANGED - drop the frame cache so the
+                    // next think() sees FRESH pixels, not the pre-action shot.
+                    accessibility.invalidateShotCache()
                     val after = accessibility.captureScreenDetailed(70)
                     after != screen
                 }
@@ -425,9 +428,19 @@ object SQLAgentCoreV5 {
             accessibility.captureScreenshot()
         } ?: return null
         return try {
+            // G5: downscale BEFORE encode - uploads smaller/faster so the
+            // model gets its answer sooner ("dimag slow" was partly latency).
+            var src = bitmap
+            var scaled: Bitmap? = null
+            if (bitmap.width > 1280) {
+                val h = (bitmap.height.toLong() * 1280 / bitmap.width).toInt().coerceAtLeast(1)
+                scaled = Bitmap.createScaledBitmap(bitmap, 1280, h, false)
+                src = scaled
+            }
             val stream = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 65, stream)
-            // G1: do NOT recycle - the frame is service-owned (shared cache).
+            src.compress(Bitmap.CompressFormat.JPEG, 65, stream)
+            scaled?.recycle()
+            // G1: do NOT recycle the frame itself - service-owned (shared cache).
             stream.toByteArray()
         } catch (t: Throwable) {
             null

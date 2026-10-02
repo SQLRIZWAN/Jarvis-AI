@@ -60,6 +60,19 @@ object WhatsAppCallAutomationHandler {
         } catch (e: Exception) {
             // ignore
         }
+        // G5: GUARANTEE the phone returns to normal audio - a leftover
+        // MODE_IN_COMMUNICATION + speakerphone ON breaks everything after
+        // the call (STT dead, voice notes record silence, audio weird).
+        try {
+            AudioManagerController.exitCallAudioMode(SqlAiApp.instance)
+        } catch (e: Exception) {
+            // ignore
+        }
+        try {
+            Speaker.setQueueGate(true)
+        } catch (e: Exception) {
+            // ignore
+        }
         if (CallStateMachine.current() != CallStateMachine.State.IDLE) {
             CallStateMachine.to(CallStateMachine.State.ENDED)
             CallStateMachine.reset()
@@ -161,6 +174,9 @@ object WhatsAppCallAutomationHandler {
                     announce("Call audio route failed - message not delivered")
                     return false
                 }
+                // G5: session already ended inside deliverLive - normal
+                // speaker, phone back to normal audio, call stays live.
+                announce("Message delivered. Call is live - aap baat karo.")
             } else {
                 // G2 F1: blank message used to end the session SILENTLY right
                 // after connect (no speech, no mic). Now: keep duplex up so
@@ -177,7 +193,11 @@ object WhatsAppCallAutomationHandler {
                     GeminiLiveAudioEngine.enterCallMode(SqlAiApp.instance)
                 }
                 announce("Call is connected. Aap bol sakte hain.")
-                holdUntilCallEnds(accessibility, maxMs = 90_000)
+                // G5: 10s reply window ONLY - then restore audio. The WhatsApp
+                // call keeps running on its own; we must NEVER sit in call
+                // mode for minutes (user: "call laga kar baithak jata hai").
+                holdUntilCallEnds(accessibility, maxMs = 10_000)
+                endSession()
             }
             true
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -448,8 +468,9 @@ object WhatsAppCallAutomationHandler {
                 }
                 // Stay in the call so the recipient can answer back - abort
                 // the moment the call really ends (no post-call speech).
-                // G2: 120s conversation window (was 45s - cut people off).
-                holdUntilCallEnds(accessibility, maxMs = 120_000)
+                // G5: 15s reply window only - the agent must get control
+                // back fast ("call laga kar baithak jata hai" was this hold).
+                holdUntilCallEnds(accessibility, maxMs = 15_000)
             } else {
                 LogBus.log(
                     "[WA-CALL] all route attempts FAILED " +

@@ -90,20 +90,46 @@ object DeviceController {
         }
 
         val ctx = SqlAiApp.instance
+        // G5: clean audio slate - a leftover MODE_IN_COMMUNICATION/speaker
+        // from a previous call makes WhatsApp record SILENCE (empty notes),
+        // and a leftover duplex mic steals the capture (concurrent capture
+        // = WhatsApp's recorder gets muted by the OS).
+        try {
+            AudioManagerController.exitCallAudioMode(ctx)
+        } catch (e: Exception) {
+            // ignore
+        }
+        try {
+            if (GeminiLiveAudioEngine.isMicStreaming()) GeminiLiveAudioEngine.stopMic()
+        } catch (e: Exception) {
+            // ignore
+        }
         // Ownership pauses the wake-word loop only - WhatsApp records the mic
         // itself; we just keep our STT from fighting it mid-hold.
         val owned = AudioManagerController.acquireMic(
             ctx, AudioManagerController.MicOwner.VOICE_NOTE
         )
         var oldVol = -1
+        // Gate the speech queue so NO other line can QUEUE_FLUSH-cut the
+        // audio that is being recorded into the note.
+        Speaker.setQueueGate(false)
         try {
             if (message.isNotBlank()) {
                 oldVol = AudioManagerController.boostMediaVolume(ctx)
-                Speaker.postPriority(message) // spoken INTO the voice note
-                delay(250)
+                // G5: direct, deterministic TTS - postPriority used to go
+                // through Gemini routes that often started late or never
+                // (-> WhatsApp recorded an EMPTY note).
+                val started = Speaker.speakForHold(message)
+                if (!started) {
+                    LogBus.log("[VOICE-NOTE] direct TTS failed - queue fallback", LogLevel.WARN)
+                    Speaker.setQueueGate(true) // let the consumer speak it
+                    Speaker.postPriority(message)
+                }
+                delay(400)
             } else {
+                Speaker.setQueueGate(true) // user speaks live - no gate needed
                 Speaker.postPriority("Boliye, voice note record ho raha hai")
-                delay(600)
+                delay(700)
             }
             LogBus.log(
                 "[VOICE-NOTE] hold (${target.x},${target.y}) ${holdMs}ms " +
@@ -121,6 +147,7 @@ object DeviceController {
             }
             return true
         } finally {
+            Speaker.setQueueGate(true)
             AudioManagerController.restoreMediaVolume(ctx, oldVol)
             if (owned) {
                 AudioManagerController.releaseMic(AudioManagerController.MicOwner.VOICE_NOTE)
@@ -132,7 +159,9 @@ object DeviceController {
     private fun estimateVoiceNoteMs(message: String): Int {
         if (message.isBlank()) return 6_000 // user speaks live
         val words = message.split(Regex("\\s+")).size
-        return (words * 400 + 1_800).coerceIn(2_500, 45_000)
+        // G5: lead-in for TTS start latency + tail so the last word is not
+        // cut when the hold releases.
+        return (words * 450 + 3_000).coerceIn(3_000, 45_000)
     }
 
     /**
