@@ -9,7 +9,7 @@ taps, swipes and typing for you.
 | | |
 |---|---|
 | Repository | `Jarvis-AI` |
-| App name | **SQL AI v5.2 Ultimate Agent** (dynamic, version-stamped) |
+| App name | **SQL AI v5.3 Ultimate Agent** (dynamic, version-stamped) |
 | Package | `com.sqlai.assistant` |
 | Language | Kotlin + Jetpack Compose |
 | Min SDK | 26 (Android 8.0) |
@@ -18,6 +18,33 @@ taps, swipes and typing for you.
 
 ---
 
+## What's new in v5.3
+
+User-reported v5.2 failures: crash mid-task, call sunta-bolta nahi, voice
+message bhejne pe text chala jata tha. Fix order:
+
+- **Screenshot crash KILLED** - har screenshot pe naya thread banta jo kabhi
+  free nahi tha (40-200/task = hundreds of leaked threads -> native OOM
+  crash). Ab: ONE shared executor + 800ms frame cache (no capture bursts),
+  step shots 720p JPEG (was full-res PNG ~10-18MB), OOM caught as Throwable,
+  failed steps pe hi save.
+- **Call pipeline complete** - speech ab call ke DORAN kabhi drop nahi hota
+  (consumer call stream pe route karta hai); delivery speakerphone-FIRST
+  (far-end ko sirf acoustic playback sunai deta hai - pehle earpiece pe
+  "DELIVERED" local-only tha); TTS `awaitCallSpeech` serialized queue +
+  onDone proof; blank-message call ab duplex start karta hai (pehle chup
+  session khatam); mic idle-release fix (STT dobara arm ho paya);
+  TTS-ready wait (pehle instant fail); connect markers broadened; wa_call
+  budget 180s (pehle 90s me cancel + chup); 120s talk window (pehle 45s).
+- **voice_note action (NEW)** - asli WhatsApp voice note: mic button
+  press-and-hold gesture (`hold()` primitive), mic content-desc/dump se
+  locate (blind tap BANNED - typed text pe send ho jata), TTS words ko
+  mic me bolta hai (media volume boost), ya text omit karo to USER khud
+  bole. `type_text` for voice messages ab prompt me FORBIDDEN hai.
+- **swipe fix** - prompt `x1,y1` bolta tha parser `x` leta tha -> swipes
+  chup-chaap kaam hi nahi karte the.
+
+---
 ## What's new in v5.2
 
 On-device reality check: mic sunta nahi tha, call pe awaaz jaati nahi thi,
