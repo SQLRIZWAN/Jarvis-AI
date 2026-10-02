@@ -73,7 +73,6 @@ class AccessibilityWatchdogService : android.app.Service() {
 
     private val checker = object : Runnable {
         override fun run() {
-            if (isDestroyed) return
             cycles++
             try {
                 checkAccessibility()

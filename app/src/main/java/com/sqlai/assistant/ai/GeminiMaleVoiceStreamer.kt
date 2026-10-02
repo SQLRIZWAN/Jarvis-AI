@@ -5,6 +5,7 @@ import android.media.AudioFormat
 import android.media.AudioTrack
 import com.sqlai.assistant.core.AppSettings
 import com.sqlai.assistant.core.AudioManagerController
+import com.sqlai.assistant.core.AiProvider
 import com.sqlai.assistant.core.CorePromptBuilder
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
@@ -142,7 +143,7 @@ object GeminiMaleVoiceStreamer {
             // Server never completed the turn - the socket is untrustworthy.
             closeQuietly()
         }
-        ok
+        return ok
     }
 
     // ------------------------------------------------------------ connection
