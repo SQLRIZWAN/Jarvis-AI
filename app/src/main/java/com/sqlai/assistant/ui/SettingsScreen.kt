@@ -44,15 +44,22 @@ import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.AssistantLanguage
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
+import com.sqlai.assistant.core.PermissionHelper
 import com.sqlai.assistant.core.VoiceGender
 import com.sqlai.assistant.engine.HistoryStore
 import com.sqlai.assistant.engine.Speaker
 import com.sqlai.assistant.service.ListeningService
+import com.sqlai.assistant.ui.theme.SqlError
+import com.sqlai.assistant.ui.theme.SqlSuccess
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(
+    onOpenApi: () -> Unit = {},
+    onOpenAccess: () -> Unit = {}
+) {
     val context = LocalContext.current
     val scope = AppCrashHandler.safeScope(rememberCoroutineScope())
     val settings by SqlAiApp.settings.settings.collectAsState(initial = null)
@@ -73,6 +80,17 @@ fun SettingsScreen() {
         }
     }
 
+    var permTick by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            permTick++
+            delay(2500)
+        }
+    }
+    val statuses = remember(permTick, settings) {
+        PermissionHelper.statuses(context)
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -83,8 +101,9 @@ fun SettingsScreen() {
         Spacer(Modifier.height(4.dp))
         Text("Settings", fontSize = 22.sp, fontWeight = FontWeight.Bold)
 
-        // ------------------------------------------------------ wake word
-        SectionCard(title = "Wake word") {
+        // ------------------------------------------- voice & language (v6)
+        SectionCard(title = "Voice & Language") {
+            GroupLabel("Wake word")
             OutlinedTextField(
                 value = wakeWord,
                 onValueChange = {
@@ -101,10 +120,9 @@ fun SettingsScreen() {
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.outline
             )
-        }
 
-        // ----------------------------------------------------- language
-        SectionCard(title = "Language (commands + replies)") {
+
+            GroupLabel("Language (commands + replies)")
             ExposedDropdownMenuBox(
                 expanded = languageMenuOpen,
                 onExpandedChange = { languageMenuOpen = it }
@@ -152,10 +170,9 @@ fun SettingsScreen() {
                     Text("Apply to mic")
                 }
             }
-        }
 
-        // -------------------------------------------------- voice (gender)
-        SectionCard(title = "Voice") {
+
+            GroupLabel("Voice & replies")
             ExposedDropdownMenuBox(
                 expanded = genderMenuOpen,
                 onExpandedChange = { genderMenuOpen = it }
@@ -244,28 +261,18 @@ fun SettingsScreen() {
                 onValueChange = { v -> scope.launch { SqlAiApp.settings.setTtsSpeed(v) } },
                 valueRange = 0.5f..2.0f
             )
-        }
 
-        // --------------------------------------------------- agent + vision
-        SectionCard(title = "Agent (task completion)") {
+            Spacer(Modifier.height(6.dp))
             ToggleRow(
-                title = "Screen vision (screenshot)",
-                subtitle = "Let the AI actually SEE the screen (Gemini/vision models)",
-                checked = settings?.screenVisionEnabled == true,
-                onCheckedChange = { v ->
-                    scope.launch { SqlAiApp.settings.setScreenVisionEnabled(v) }
-                }
-            )
-            Text(
-                "Unlimited steps - the Think -> Act -> Verify loop keeps running " +
-                    "until the task is 100% verified complete.",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.outline
+                title = "Voice replies (TTS)",
+                subtitle = "Speak the assistant's answer out loud",
+                checked = settings?.ttsEnabled == true,
+                onCheckedChange = { v -> scope.launch { SqlAiApp.settings.setTtsEnabled(v) } }
             )
         }
 
-        // --------------------------------------------- automation toggles
-        SectionCard(title = "Automation") {
+        // ------------------------------------------ call & auto-reply (v6)
+        SectionCard(title = "Call & Auto-Reply") {
             ToggleRow(
                 title = "WhatsApp / SMS auto-reply",
                 subtitle = "Reply automatically to incoming messages",
@@ -325,12 +332,72 @@ fun SettingsScreen() {
                     }
                 }
             )
-            ToggleRow(
-                title = "Voice replies (TTS)",
-                subtitle = "Speak the assistant's answer out loud",
-                checked = settings?.ttsEnabled == true,
-                onCheckedChange = { v -> scope.launch { SqlAiApp.settings.setTtsEnabled(v) } }
+        }
+
+        // ---------------------------------------- api & model config (v6)
+        SectionCard(title = "API & Model Config") {
+            ConfigRow("Provider", settings?.provider?.label ?: "-")
+            ConfigRow("Chat model", settings?.model?.ifBlank { "-" } ?: "-")
+            ConfigRow(
+                "API key",
+                settings?.apiKey?.takeIf { it.isNotBlank() }
+                    ?.let { "set (\u2026${it.takeLast(4)})" } ?: "not set"
             )
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onOpenApi,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Edit provider / key / model")
+            }
+        }
+
+        // ------------------------------------------ permissions check (v6)
+        SectionCard(title = "Permissions Check") {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                statuses.forEach { perm ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(perm.title, fontSize = 13.sp)
+                        Text(
+                            if (perm.granted) "Granted" else "Missing",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (perm.granted) SqlSuccess else SqlError
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onOpenAccess,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Open Access tab")
+            }
+        }
+
+        // ---------------------------------------------------- system (v6)
+        SectionCard(title = "System") {
+            GroupLabel("Agent (vision)")
+            ToggleRow(
+                title = "Screen vision (screenshot)",
+                subtitle = "Let the AI actually SEE the screen (Gemini/vision models)",
+                checked = settings?.screenVisionEnabled == true,
+                onCheckedChange = { v ->
+                    scope.launch { SqlAiApp.settings.setScreenVisionEnabled(v) }
+                }
+            )
+            Text(
+                "Unlimited steps - the Think -> Act -> Verify loop keeps running " +
+                    "until the task is 100% verified complete.",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.outline
+            )
+
+            GroupLabel("Automation")
             ToggleRow(
                 title = "Live screen context",
                 subtitle = "Send the current screen text to the AI",
@@ -349,10 +416,8 @@ fun SettingsScreen() {
                 checked = settings?.bootRestartEnabled == true,
                 onCheckedChange = { v -> scope.launch { SqlAiApp.settings.setBootRestartEnabled(v) } }
             )
-        }
 
-        // -------------------------------------------------------- system
-        SectionCard(title = "System") {
+            GroupLabel("Shortcuts")
             SettingsLinkRow("Battery optimization", onClick = {
                 try {
                     context.startActivity(
@@ -413,7 +478,7 @@ fun SettingsScreen() {
                 Text(BuildConfig.VERSION_NAME, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             }
             Text(
-                "SQL AI v1.1 - Agentic phone-control assistant (Jarvis-AI)",
+                "SQL AI v6.0 Pro - Agentic phone-control assistant (Jarvis-AI)",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.padding(top = 6.dp)
@@ -421,6 +486,33 @@ fun SettingsScreen() {
         }
 
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+/** v6.0 - small bold sub-heading inside a settings card. */
+@Composable
+private fun GroupLabel(text: String) {
+    Text(
+        text,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(vertical = 6.dp)
+    )
+}
+
+/** v6.0 - read-only "label : value" row for the API summary card. */
+@Composable
+private fun ConfigRow(label: String, value: String) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, fontSize = 13.sp, color = MaterialTheme.colorScheme.outline)
+        Text(value, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
     }
 }
 

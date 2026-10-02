@@ -46,6 +46,11 @@ import kotlinx.coroutines.launch
 class ListeningService : Service() {
 
     companion object {
+        /** v6.0 dashboard badge: true while the service instance lives. */
+        @Volatile
+        var isActive = false
+            private set
+
         const val ACTION_START = "com.sqlai.assistant.action.START"
         const val ACTION_STOP = "com.sqlai.assistant.action.STOP"
         const val ACTION_TRIGGER = "com.sqlai.assistant.action.TRIGGER"
@@ -110,6 +115,7 @@ class ListeningService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        isActive = true
         Speaker.init(this)
         // v6.0: when Speaker yields the mic for playback, cancel our
         // recognizer session so ownership bookkeeping stays honest.
@@ -200,6 +206,7 @@ class ListeningService : Service() {
     override fun onDestroy() {
         wasRunning = running
         running = false
+        isActive = false
         AudioManagerController.setPlaybackYieldHook(null)
         mainHandler.removeCallbacksAndMessages(null)
         settingsJob?.cancel()

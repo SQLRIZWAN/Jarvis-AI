@@ -34,7 +34,7 @@ import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.service.ListeningService
 import com.sqlai.assistant.ui.ApiConfigScreen
-import com.sqlai.assistant.ui.DashboardScreen
+import com.sqlai.assistant.ui.DashboardScreenV6
 import com.sqlai.assistant.ui.PermissionsScreen
 import com.sqlai.assistant.ui.PromptScreen
 import com.sqlai.assistant.ui.SettingsScreen
@@ -143,11 +143,16 @@ private fun AppRoot() {
             startDestination = "dashboard",
             modifier = Modifier.padding(padding)
         ) {
-            composable("dashboard") { DashboardScreen() }
+            composable("dashboard") { DashboardScreenV6() }
             composable("permissions") { PermissionsScreen() }
             composable("api") { ApiConfigScreen() }
             composable("prompt") { PromptScreen() }
-            composable("settings") { SettingsScreen() }
+            composable("settings") {
+                SettingsScreen(
+                    onOpenApi = { navController.navigate("api") },
+                    onOpenAccess = { navController.navigate("permissions") }
+                )
+            }
         }
     }
 }

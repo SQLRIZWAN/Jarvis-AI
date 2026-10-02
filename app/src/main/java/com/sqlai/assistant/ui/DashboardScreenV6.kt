@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,14 +29,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -53,20 +53,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.sqlai.assistant.R
 import com.sqlai.assistant.BuildConfig
+import com.sqlai.assistant.R
 import com.sqlai.assistant.SqlAiApp
+import com.sqlai.assistant.ai.GeminiLiveAudioEngine
 import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.AssistantState
+import com.sqlai.assistant.core.AudioManagerController
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.core.PermissionHelper
 import com.sqlai.assistant.core.StateBus
 import com.sqlai.assistant.engine.AssistantEngine
+import com.sqlai.assistant.engine.SQLAgentEngineV4
+import com.sqlai.assistant.service.AutonomousCallBridgeService
+import com.sqlai.assistant.service.CallStateMachine
 import com.sqlai.assistant.service.ListeningService
 import com.sqlai.assistant.ui.theme.SqlCyan
 import com.sqlai.assistant.ui.theme.SqlError
@@ -74,20 +80,41 @@ import com.sqlai.assistant.ui.theme.SqlSuccess
 import com.sqlai.assistant.ui.theme.SqlWarn
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.sin
 
+/**
+ * v6.0 dashboard - Material 3 home screen.
+ *
+ * New over v5.4:
+ *  - "SQL AI v6.0 Pro" header (auto app_name resValue from versionName),
+ *  - live status badges: Background Service / Accessibility / Call Bridge,
+ *  - mic waveform visualizer driven by the live RMS level,
+ *  - live metric cards: mic owner, call state, Gemini live state, task.
+ */
 @Composable
-fun DashboardScreen() {
+fun DashboardScreenV6() {
     val context = LocalContext.current
     val settings by SqlAiApp.settings.settings.collectAsState(initial = null)
     val state by StateBus.state.collectAsState()
     val lastCommand by StateBus.lastCommand.collectAsState()
     val micLevel by StateBus.level.collectAsState()
     val logs by LogBus.logs.collectAsState()
+    val micOwner by AudioManagerController.micOwner.collectAsState()
+    val liveState by GeminiLiveAudioEngine.state.collectAsState()
+    val taskState by SQLAgentEngineV4.taskState.collectAsState()
 
     var permissionTick by remember { mutableStateOf(0) }
+    var callStateName by remember { mutableStateOf(CallStateMachine.current().name) }
+    var bridgeActive by remember { mutableStateOf(AutonomousCallBridgeService.isRunning) }
+    var serviceActive by remember { mutableStateOf(ListeningService.isActive) }
     LaunchedEffect(Unit) {
         while (true) {
             permissionTick++
+            callStateName = CallStateMachine.current().name
+            bridgeActive = AutonomousCallBridgeService.isRunning
+            serviceActive = ListeningService.isActive
             delay(2500)
         }
     }
@@ -144,7 +171,29 @@ fun DashboardScreen() {
             )
         }
 
-        // ------------------------------------------------------ voice orb
+        // --------------------------------------------- status badges (v6)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            StatusChip(
+                label = "Service",
+                ok = serviceActive,
+                modifier = Modifier.weight(1f)
+            )
+            StatusChip(
+                label = "Accessibility",
+                ok = PermissionHelper.isAccessibilityEnabled(context),
+                modifier = Modifier.weight(1f)
+            )
+            StatusChip(
+                label = "Call bridge",
+                ok = bridgeActive,
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        // ------------------------------------- voice orb + mic waveform
         SectionCard {
             Column(
                 Modifier.fillMaxWidth(),
@@ -152,6 +201,8 @@ fun DashboardScreen() {
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 VoiceOrb(state = state, level = micLevel)
+                MicWaveform(level = micLevel, active = state == AssistantState.LISTENING ||
+                    state == AssistantState.PROCESSING)
                 Text(
                     text = when (state) {
                         AssistantState.DISABLED -> "Assistant disabled"
@@ -180,6 +231,43 @@ fun DashboardScreen() {
                         Text("Stop")
                     }
                 }
+            }
+        }
+
+        // ------------------------------------------------ live metrics (v6)
+        SectionCard(title = "Live metrics") {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                MetricCard(
+                    label = "Mic owner",
+                    value = micOwner.name,
+                    modifier = Modifier.weight(1f)
+                )
+                MetricCard(
+                    label = "Call state",
+                    value = callStateName,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                MetricCard(
+                    label = "Live engine",
+                    value = liveState.name,
+                    modifier = Modifier.weight(1f)
+                )
+                MetricCard(
+                    label = "Task",
+                    value = if (taskState.running) {
+                        taskState.task.takeIf { it.isNotBlank() }?.take(26) ?: "Running"
+                    } else "Idle",
+                    modifier = Modifier.weight(1f)
+                )
             }
         }
 
@@ -323,6 +411,71 @@ fun DashboardScreen() {
     }
 }
 
+/**
+ * v6.0 mic waveform - 24 animated bars driven by the live RMS level
+ * (StateBus.level). Flat when idle, symmetric envelope while speaking.
+ */
+@Composable
+private fun MicWaveform(level: Float, active: Boolean) {
+    val animatedLevel by animateFloatAsState(
+        targetValue = level.coerceIn(0f, 1f),
+        animationSpec = tween(160, easing = LinearEasing),
+        label = "wave"
+    )
+    val color = when {
+        active -> SqlCyan
+        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(44.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val bars = 24
+        for (i in 0 until bars) {
+            val envelope = 0.30f + 0.70f * abs(sin(i / bars.toDouble() * PI)).toFloat()
+            val h = (5f + animatedLevel * 38f * envelope).dp
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(h)
+                    .background(
+                        color.copy(alpha = if (active) 0.9f else 0.55f),
+                        RoundedCornerShape(2.dp)
+                    )
+            )
+        }
+    }
+}
+
+/** v6.0 metric tile - one glance at an engine's live state. */
+@Composable
+private fun MetricCard(label: String, value: String, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Text(
+                label,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.outline
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                value,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
+            )
+        }
+    }
+}
+
 /** Pulsing mic orb showing live listening intensity. */
 @Composable
 private fun VoiceOrb(state: AssistantState, level: Float) {
@@ -388,7 +541,7 @@ private fun StateBadge(state: AssistantState) {
         AssistantState.ERROR -> "ERROR" to SqlError
         AssistantState.DISABLED -> "OFF" to MaterialTheme.colorScheme.outline
     }
-    androidx.compose.material3.Surface(
+    Surface(
         shape = RoundedCornerShape(50),
         color = color.copy(alpha = 0.16f)
     ) {

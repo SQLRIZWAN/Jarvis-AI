@@ -9,7 +9,7 @@ taps, swipes and typing for you.
 | | |
 |---|---|
 | Repository | `Jarvis-AI` |
-| App name | **SQL AI v5.4 Ultimate Agent** (dynamic, version-stamped) |
+| App name | **SQL AI v6.0 Pro** (dynamic, version-stamped) |
 | Package | `com.sqlai.assistant` |
 | Language | Kotlin + Jetpack Compose |
 | Min SDK | 26 (Android 8.0) |
@@ -17,6 +17,37 @@ taps, swipes and typing for you.
 | License | MIT |
 
 ---
+
+## What's new in v6.0
+
+Crash-free + audio-correct + autonomous-call release (v5.4 ke post-release
+field reports: minutes baad crash, mic/audio focus lockup, call pe agent
+hath thak jaata tha, UI cluttered):
+
+- **Crash-proof foundation** - `AppCrashHandler` har uncaught crash ko
+  `files/crash/last_crash.txt` + LogBus me likhta hai (previous handler se
+  chain), `SQLApplicationV6` Application ban gaya, saare 10 long-lived
+  CoroutineScope me `CoroutineExceptionHandler` (ab ek failed coroutine poora
+  app nahi girata), service/engine onDestroy + onTrimMemory pe clean shutdown.
+- **AudioStreamManager** - mic ownership + audio focus ka single source of
+  truth (AudioManagerController ab thin facade). Playback (TTS/Gemini)
+  shuru hone se pehle STT mic cleanly yield hota hai (fastRearm 300ms baad
+  wapas), aur record-open flood throttle (6 attempts/10s + 10s cooldown) ->
+  infinite AudioRecord reopen loop lockup khatam.
+- **AutonomousCallBridgeService** - WhatsApp call connect hote hi agent
+  handover NAHI karta: bridge foreground service Gemini duplex se khud
+  baat karta rehta hai (fallback: SpeechCapture + TTS turn loop), speaker ON,
+  vision se call-end detect, 30 min hard cap, exit pe full audio restore.
+  Message-delivery ke baad bhi ab "aap baat karo" nahi - "Ab main baat
+  karunga" + bridge start.
+- **DashboardScreenV6 (Material 3)** - "SQL AI v6.0 Pro" header, live status
+  badges (Background Service / Accessibility / Call Bridge), mic waveform
+  visualizer (live RMS bars), live metric cards (Mic owner / Call state /
+  Live engine / Task).
+- **Settings declutter** - sab toggles ab distinct sections: Voice &
+  Language / Call & Auto-Reply / API & Model Config / Permissions Check /
+  System / About (About ka stale "v1.1" text bhi fix).
+- Branding: launcher + header ab **SQL AI v6.0 Pro** (versionName 6.0).
 
 ## What's new in v5.4
 
