@@ -119,7 +119,7 @@ object Speaker {
                     // FEATURE #3: no speaker output while a call session is
                     // in progress (DIALING/RINGING/CONNECTED/SPEAKING).
                     if (com.sqlai.assistant.service.CallStateMachine.isCallActive()) {
-                        LogBus.log("[Speaker] dropped during call: \"$text\"", LogLevel.DEBUG)
+                        LogBus.log("[Speaker] dropped during call: \"$text\"", LogLevel.INFO)
                         continue
                     }
                     try {

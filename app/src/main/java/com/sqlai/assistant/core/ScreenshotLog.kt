@@ -40,7 +40,7 @@ object ScreenshotLog {
             val file = File(dir, "Step_${n}_${safe}.png")
             file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
             trim(dir)
-            LogBus.log("[SHOTS] ${file.name}", LogLevel.DEBUG)
+            LogBus.log("[SHOTS] ${file.name}", LogLevel.INFO)
         } catch (e: Exception) {
             Log.w(TAG, "save failed", e)
         }

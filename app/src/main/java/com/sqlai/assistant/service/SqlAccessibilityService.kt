@@ -287,7 +287,7 @@ class SqlAccessibilityService : AccessibilityService() {
         val match = findBestMatch(label) ?: return false
         com.sqlai.assistant.core.LogBus.log(
             "[MATCH] '$label' conf=${match.confidence} via=${match.via}",
-            com.sqlai.assistant.core.LogLevel.DEBUG
+            com.sqlai.assistant.core.LogLevel.INFO
         )
         if (match.confidence < 55) return false
 

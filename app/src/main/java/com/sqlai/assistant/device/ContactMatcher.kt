@@ -79,7 +79,7 @@ object ContactMatcher {
         val m = a.length
         val n = b.length
         var prev = IntArray(n + 1) { it }
-        val cur = IntArray(n + 1)
+        var cur = IntArray(n + 1)
         for (i in 1..m) {
             cur[0] = i
             for (j in 1..n) {
