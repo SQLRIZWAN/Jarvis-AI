@@ -124,7 +124,9 @@ class ListeningService : Service() {
     @Volatile private var voskActive = false
     @Volatile private var voskFailed = false
     @Volatile private var voskGen = 0
-    @Volatile private var wakeMode = "vosk"
+    // v7.0.1: matches the default wakeEngine - never boot Vosk transiently
+    // before the first settings emission lands.
+    @Volatile private var wakeMode = "speech"
     @Volatile private var cachedModelLang = "en"
     @Volatile private var lastVoskTranscript = ""
 

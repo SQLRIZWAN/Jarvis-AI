@@ -24,8 +24,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.GraphicEq
@@ -136,7 +138,8 @@ fun DashboardScreenV6() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 16.dp)
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Spacer(Modifier.height(4.dp))
@@ -274,45 +277,6 @@ fun DashboardScreenV6() {
             }
         }
 
-        // ------------------------------------------- self test (v7 M7)
-        SectionCard(title = "Self test (v7 M7)") {
-            val report = remember(selfTestTick) { SelfTestSuite.run() }
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                MetricCard(
-                    label = "Checks",
-                    value = "${report.passed}/${report.total}",
-                    modifier = Modifier.weight(1f)
-                )
-                MetricCard(
-                    label = "Status",
-                    value = if (report.allPass) "PASS" else "FAIL ${report.failed.size}",
-                    modifier = Modifier.weight(1f)
-                )
-                MetricCard(
-                    label = "Injections blocked",
-                    value = "${GuardAgent.blockedCount.get()}",
-                    modifier = Modifier.weight(1f)
-                )
-            }
-            if (!report.allPass) {
-                Spacer(Modifier.height(8.dp))
-                report.failed.forEach { c ->
-                    Text(
-                        "FAIL ${c.name}: ${c.detail}",
-                        color = MaterialTheme.colorScheme.error,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            Button(onClick = { selfTestTick++ }) {
-                Text("Re-run checks")
-            }
-        }
-
         // ------------------------------------------------- manual command
         SectionCard(title = "Type a command (test)") {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -446,6 +410,45 @@ fun DashboardScreenV6() {
                 }
             }) {
                 Text("Open assistant settings")
+            }
+        }
+
+        // ------------------------------------------- self test (v7 M7)
+        SectionCard(title = "Self test (v7 M7)") {
+            val report = remember(selfTestTick) { SelfTestSuite.run() }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                MetricCard(
+                    label = "Checks",
+                    value = "${report.passed}/${report.total}",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricCard(
+                    label = "Status",
+                    value = if (report.allPass) "PASS" else "FAIL ${report.failed.size}",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricCard(
+                    label = "Injections blocked",
+                    value = "${GuardAgent.blockedCount.get()}",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            if (!report.allPass) {
+                Spacer(Modifier.height(8.dp))
+                report.failed.forEach { c ->
+                    Text(
+                        "FAIL ${c.name}: ${c.detail}",
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = { selfTestTick++ }) {
+                Text("Re-run checks")
             }
         }
 

@@ -121,7 +121,10 @@ data class AppSettings(
     val liveVoiceName: String = "",
     val liveModel: String = "gemini-live-2.5-flash-preview",
     // ---- v7 M3 : on-device wake engine ----
-    val wakeEngine: String = "vosk",
+    // v7.0.1 field fix: default back to the proven Google-STT loop; the
+    // offline Vosk engine stays an opt-in toggle. v2 key ignores any value
+    // auto-persisted by v7.0 so updates land on "speech" too.
+    val wakeEngine: String = "speech",
     val wakeModelLang: String = "en",
     // ---- v7 M4 : provider failover pool + risky-action confirm ----
     val providerKeys: Map<String, String> = emptyMap(),
@@ -192,7 +195,7 @@ class SettingsRepository(private val context: Context) {
         val GEMINI_LIVE_VOICE = booleanPreferencesKey("gemini_live_voice")
         val LIVE_VOICE_NAME = stringPreferencesKey("live_voice_name")
         val LIVE_MODEL = stringPreferencesKey("live_model")
-        val WAKE_ENGINE = stringPreferencesKey("wake_engine")
+        val WAKE_ENGINE = stringPreferencesKey("wake_engine_v2")
         val WAKE_MODEL_LANG = stringPreferencesKey("wake_model_lang")
         val PROVIDER_KEYS = stringPreferencesKey("provider_keys")
         val CONFIRM_RISKY = booleanPreferencesKey("confirm_risky")
@@ -229,7 +232,7 @@ class SettingsRepository(private val context: Context) {
             geminiLiveVoice = p[Keys.GEMINI_LIVE_VOICE] ?: true,
             liveVoiceName = p[Keys.LIVE_VOICE_NAME] ?: "",
             liveModel = p[Keys.LIVE_MODEL] ?: "gemini-live-2.5-flash-preview",
-            wakeEngine = p[Keys.WAKE_ENGINE] ?: "vosk",
+            wakeEngine = p[Keys.WAKE_ENGINE] ?: "speech",
             wakeModelLang = p[Keys.WAKE_MODEL_LANG] ?: "en",
             providerKeys = parseProviderKeys(p[Keys.PROVIDER_KEYS]),
             confirmRisky = p[Keys.CONFIRM_RISKY] ?: true

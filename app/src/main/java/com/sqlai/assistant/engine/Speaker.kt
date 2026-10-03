@@ -129,19 +129,30 @@ object Speaker {
      * v7 M6 BARGE-IN: stop the CURRENTLY-speaking line (TTS or Gemini
      * voice), drop every queued line and invalidate in-flight fallbacks.
      * Cheap no-op when nothing is playing; safe from any thread.
+     *
+     * v7.0.1: never throws - the STT wake loop calls this while arming the
+     * mic, so an audio-stack hiccup must not be able to kill recognition.
      */
     fun interruptPlayback() {
-        flushQueued()
-        playEpoch++
-        pendingUtterances.values.forEach { it(false) }
-        pendingUtterances.clear()
+        try {
+            flushQueued()
+            playEpoch++
+            pendingUtterances.values.forEach { it(false) }
+            pendingUtterances.clear()
+        } catch (e: Exception) {
+            Log.w(TAG, "interrupt flush failed", e)
+        }
         try {
             tts?.stop()
         } catch (e: Exception) {
             Log.w(TAG, "interrupt tts failed", e)
         }
-        GeminiMaleVoiceStreamer.interruptPlayback()
-        GeminiLiveAudioEngine.interruptPlayback()
+        try {
+            GeminiMaleVoiceStreamer.interruptPlayback()
+            GeminiLiveAudioEngine.interruptPlayback()
+        } catch (e: Exception) {
+            Log.w(TAG, "interrupt gemini failed", e)
+        }
         LogBus.log("[Speaker] playback interrupted (barge-in)", LogLevel.INFO)
     }
 
