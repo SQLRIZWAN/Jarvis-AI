@@ -90,16 +90,17 @@ object AudioStreamManager {
         synchronized(this) {
             val current = _micOwner.value
             if (current == owner) return true
-            if (current == MicOwner.STT &&
+            if ((current == MicOwner.STT || current == MicOwner.VOSK) &&
                 (owner == MicOwner.GEMINI_LIVE ||
                     owner == MicOwner.CALL_CAPTURE ||
                     owner == MicOwner.VOICE_NOTE)
             ) {
-                // Voice-call paths preempt the background wake-word loop; the
-                // STT owner observes the owner change and cancels its session.
+                // Voice-call paths preempt the background wake loops (STT
+                // recognizer AND the v7 always-on Vosk engine); the owner
+                // observes the change and cancels its session.
                 _micOwner.value = owner
                 micSince = System.currentTimeMillis()
-                Log.w(TAG, "Mic preempted: STT -> ${owner.name}")
+                Log.w(TAG, "Mic preempted: ${current.name} -> ${owner.name}")
                 requestFocus(context)
                 return true
             }

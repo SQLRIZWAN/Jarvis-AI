@@ -121,6 +121,25 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.outline
             )
 
+            Spacer(Modifier.height(10.dp))
+            ToggleRow(
+                title = "Offline wake word (Vosk)",
+                subtitle = "On-device detection - works without internet, auto-fallback",
+                checked = settings?.wakeEngine != "speech",
+                onCheckedChange = { v ->
+                    scope.launch { SqlAiApp.settings.setWakeEngine(if (v) "vosk" else "speech") }
+                }
+            )
+            if (settings?.wakeEngine != "speech") {
+                ToggleRow(
+                    title = "Hindi wake model",
+                    subtitle = "Use the Hindi acoustic model for the wake word",
+                    checked = settings?.wakeModelLang == "hi",
+                    onCheckedChange = { v ->
+                        scope.launch { SqlAiApp.settings.setWakeModelLang(if (v) "hi" else "en") }
+                    }
+                )
+            }
 
             GroupLabel("Language (commands + replies)")
             ExposedDropdownMenuBox(

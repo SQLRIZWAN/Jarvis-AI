@@ -97,6 +97,8 @@ dependencies {
 
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // v7 M3: offline on-device wake word (Kaldi via Vosk).
+    implementation("com.alphacephei:vosk-android:0.3.47")
 
     testImplementation("junit:junit:4.13.2")
     // Real org.json on the JVM - the mockable android.jar stubs would throw.

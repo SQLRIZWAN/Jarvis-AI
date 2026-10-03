@@ -24,6 +24,7 @@ import com.sqlai.assistant.core.AudioManagerController
 import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.core.StateBus
+import com.sqlai.assistant.core.VoskWakeWordEngine
 import com.sqlai.assistant.ai.GeminiLiveAudioEngine
 import com.sqlai.assistant.agent.AgentOS
 import com.sqlai.assistant.engine.AssistantEngine
@@ -42,7 +43,11 @@ import kotlinx.coroutines.launch
  * High-priority foreground service that keeps the microphone alive 24/7 and
  * watches for the wake word ("SQL" by default).
  *
- * Flow:  wake word -> (optional pause for command) -> AssistantEngine.execute()
+ * v7 M3 flow: the always-on Vosk engine (offline Kaldi) detects the wake
+ * word, yields the mic, and a <=6 s SpeechRecognizer burst captures the
+ * command -> AgentOS routes it. wakeEngine="speech" (or any Vosk failure
+ * such as a dead model download) falls back to the legacy 24/7 STT wake
+ * loop with zero behaviour change.
  */
 class ListeningService : Service() {
 
@@ -114,6 +119,15 @@ class ListeningService : Service() {
     @Volatile private var wasSpeaking = false
     @Volatile private var permissionWarnedAt = 0L
 
+    // ---- v7 M3: always-on Vosk wake engine state ----
+    @Volatile private var voskEngine: VoskWakeWordEngine? = null
+    @Volatile private var voskActive = false
+    @Volatile private var voskFailed = false
+    @Volatile private var voskGen = 0
+    @Volatile private var wakeMode = "vosk"
+    @Volatile private var cachedModelLang = "en"
+    @Volatile private var lastVoskTranscript = ""
+
     override fun onCreate() {
         super.onCreate()
         isActive = true
@@ -155,6 +169,8 @@ class ListeningService : Service() {
                 StateBus.setState(AssistantState.LISTENING)
                 LogBus.log("Assist triggered - waiting for your command")
                 cancelRecognition()
+                // v7 M3: direct burst - Vosk yields the mic, re-arms after.
+                stopVosk()
                 mainHandler.postDelayed({ startRecognition() }, 150)
                 return START_STICKY
             }
@@ -208,6 +224,7 @@ class ListeningService : Service() {
         wasRunning = running
         running = false
         isActive = false
+        stopVosk()
         AudioManagerController.setPlaybackYieldHook(null)
         mainHandler.removeCallbacksAndMessages(null)
         settingsJob?.cancel()
@@ -259,6 +276,9 @@ class ListeningService : Service() {
             running = true
             LogBus.log("24/7 wake-word listening started", LogLevel.SUCCESS)
         }
+        // v7 M3: offline Vosk wake engine first; speech loop keeps interim
+        // coverage while its model downloads on first run.
+        if (wakeMode == "vosk" && !voskFailed) startVoskPipeline()
         if (SpeechRecognizer.isRecognitionAvailable(this)) {
             StateBus.setState(AssistantState.LISTENING)
             mainHandler.removeCallbacks(watchdog)
@@ -315,6 +335,20 @@ class ListeningService : Service() {
             SqlAiApp.settings.settings.collect { settings ->
                 cachedWakeWord = settings.wakeWord.ifBlank { "sql" }
                 cachedLanguageTag = settings.language.sttTag
+                val newMode = if (settings.wakeEngine.equals("speech", ignoreCase = true)) {
+                    "speech"
+                } else "vosk"
+                val newLang = if (settings.wakeModelLang.equals("hi", ignoreCase = true)) {
+                    "hi"
+                } else "en"
+                if (newMode != wakeMode || newLang != cachedModelLang) {
+                    // Setting changed - retry Vosk if the user flips back.
+                    voskFailed = false
+                    if (newMode == "speech") stopVosk()
+                    wakeMode = newMode
+                    cachedModelLang = newLang
+                    if (running && newMode == "vosk") startVoskPipeline()
+                }
                 val shouldRun = settings.assistantEnabled && settings.listenServiceEnabled
                 if (shouldRun && !running) {
                     ensureRunning()
@@ -351,6 +385,7 @@ class ListeningService : Service() {
         awaitingCommand = false
         mainHandler.removeCallbacksAndMessages(null)
         cancelRecognition()
+        stopVosk()
         try {
             wakeLock?.release()
         } catch (e: Exception) {
@@ -365,7 +400,7 @@ class ListeningService : Service() {
     private fun resumeIdle() {
         awaitingCommand = false
         StateBus.setState(if (running) AssistantState.LISTENING else AssistantState.DISABLED)
-        mainHandler.postDelayed({ if (running) startRecognition() }, 700)
+        mainHandler.postDelayed({ if (running) armWakeLoop() }, 700)
     }
 
     // ------------------------------------------------------------ STT plumbing
@@ -373,7 +408,14 @@ class ListeningService : Service() {
     private val watchdog = object : Runnable {
         override fun run() {
             if (!running) return
-            if (isListening) {
+            if (voskActive) {
+                // v7 M3: health-check the offline wake engine thread.
+                if (voskEngine?.isAlive() != true) {
+                    LogBus.log("Vosk engine thread died - restarting", LogLevel.WARN)
+                    stopVosk()
+                    startVoskPipeline()
+                }
+            } else if (isListening) {
                 // Frozen session detector: a SpeechRecognizer that never
                 // returns results is force-restarted instead of hanging.
                 if (System.currentTimeMillis() - listeningSince > 9000) {
@@ -428,6 +470,10 @@ class ListeningService : Service() {
             if (AudioManagerController.micHeldMs() <= 45_000) return
         } else if (callSessionActive()) {
             return // duplex during a call may legitimately hold the mic
+        } else if (owner == AudioManagerController.MicOwner.VOSK &&
+            voskActive && voskEngine?.isAlive() == true
+        ) {
+            return // v7: the 24/7 offline wake engine legitimately holds it
         } else if (owner == AudioManagerController.MicOwner.GEMINI_LIVE &&
             GeminiLiveAudioEngine.isMicStreaming()
         ) {
@@ -537,7 +583,7 @@ class ListeningService : Service() {
         recognizer = null
         isListening = false
         consecutiveErrors = 0
-        if (running) mainHandler.postDelayed({ startRecognition() }, 400)
+        if (running) mainHandler.postDelayed({ armWakeLoop() }, 400)
     }
 
     private fun cancelRecognition() {
@@ -550,7 +596,101 @@ class ListeningService : Service() {
     }
 
     private fun scheduleNext(delayMs: Long = 450) {
-        mainHandler.postDelayed({ if (running) startRecognition() }, delayMs)
+        mainHandler.postDelayed({ if (running) armWakeLoop() }, delayMs)
+    }
+
+    /**
+     * v7 M3 - re-arm the right wake pipeline: offline Vosk when enabled and
+     * healthy, the legacy STT loop otherwise (or while the Vosk model is
+     * still downloading on first run - interim coverage, no dead air).
+     */
+    private fun armWakeLoop() {
+        if (!running) return
+        if (wakeMode == "vosk" && !voskFailed) {
+            startVoskPipeline() // no-op when an engine already exists
+            if (voskActive) return
+        }
+        startRecognition()
+    }
+
+    // -------------------------------------------------------- v7 Vosk wake
+
+    private fun startVoskPipeline() {
+        if (!running || wakeMode != "vosk" || voskFailed || voskEngine != null) return
+        val gen = ++voskGen
+        LogBus.log("Vosk wake engine starting (model=$cachedModelLang, word=\"$cachedWakeWord\")")
+        val engine = VoskWakeWordEngine(
+            context = applicationContext,
+            wakeWord = cachedWakeWord,
+            modelLang = cachedModelLang,
+            onReady = {
+                mainHandler.post {
+                    if (gen != voskGen || !running) return@post
+                    voskActive = true
+                    LogBus.log("Vosk wake engine ready - offline listening", LogLevel.SUCCESS)
+                    if (isListening) cancelRecognition()
+                }
+            },
+            onWake = { transcript ->
+                mainHandler.post {
+                    if (gen == voskGen && running) onVoskWake(transcript)
+                }
+            },
+            onFailed = { reason ->
+                mainHandler.post {
+                    if (gen == voskGen) onVoskFailed(reason)
+                }
+            }
+        )
+        voskEngine = engine
+        engine.start()
+    }
+
+    /** Wake word heard: yield the mic, then a 300 ms-later STT burst. */
+    private fun onVoskWake(transcript: String) {
+        if (!running) return
+        // Self-hearing guard: never treat our own TTS as a wake word.
+        if (Speaker.isSpeaking() || awaitingCommand) return
+        lastVoskTranscript = transcript
+        LogBus.log("Vosk wake word detected - capturing command", LogLevel.SUCCESS)
+        awaitingCommand = true
+        awaitingAttempts = 0
+        StateBus.setState(AssistantState.LISTENING)
+        promoteToForeground()
+        stopVosk()
+        mainHandler.postDelayed({
+            if (!running || !awaitingCommand) return@postDelayed
+            if (SpeechRecognizer.isRecognitionAvailable(this)) {
+                if (!isListening) startRecognition()
+                return@postDelayed
+            }
+            // No Google STT on device - consume the Vosk buffer directly.
+            val fallback = lastVoskTranscript
+            lastVoskTranscript = ""
+            awaitingCommand = false
+            val cmd = stripWakeWord(fallback.lowercase(), cachedWakeWord).trim()
+            if (cmd.length >= 2) processCommand(cmd) else armWakeLoop()
+        }, 300)
+    }
+
+    /** Vosk unavailable - latch the fallback and keep the STT loop alive. */
+    private fun onVoskFailed(reason: String) {
+        voskEngine = null
+        voskActive = false
+        voskFailed = true
+        LogBus.log(
+            "Vosk wake unavailable ($reason) - falling back to STT wake loop",
+            LogLevel.WARN
+        )
+        if (running && !isListening) scheduleNext(450)
+    }
+
+    private fun stopVosk() {
+        voskGen++ // invalidate any in-flight engine callbacks
+        voskActive = false
+        val engine = voskEngine
+        voskEngine = null
+        engine?.stop()
     }
 
     private val recognitionListener = object : RecognitionListener {
@@ -574,6 +714,19 @@ class ListeningService : Service() {
         override fun onError(error: Int) {
             endSession()
             StateBus.setLevel(0f)
+            // v7 M3: the burst heard nothing - fall back to whatever Vosk
+            // buffered around the wake word before it yielded the mic.
+            if ((error == SpeechRecognizer.ERROR_NO_MATCH ||
+                    error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) &&
+                awaitingCommand && lastVoskTranscript.isNotBlank()
+            ) {
+                val fallback = lastVoskTranscript
+                lastVoskTranscript = ""
+                LogBus.log("STT burst empty - using Vosk buffer: \"$fallback\"", LogLevel.WARN)
+                consecutiveErrors = 0
+                evaluateWakeWord(fallback, isFinal = true)
+                return
+            }
             when (error) {
                 SpeechRecognizer.ERROR_NO_MATCH,
                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->

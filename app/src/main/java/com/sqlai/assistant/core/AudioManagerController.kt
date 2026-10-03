@@ -26,7 +26,7 @@ object AudioManagerController {
 
     private const val TAG = "AudioMgrCtrl"
 
-    enum class MicOwner { NONE, STT, GEMINI_LIVE, CALL_CAPTURE, VOICE_NOTE }
+    enum class MicOwner { NONE, STT, VOSK, GEMINI_LIVE, CALL_CAPTURE, VOICE_NOTE }
 
     val micOwner: StateFlow<MicOwner>
         get() = AudioStreamManager.micOwner

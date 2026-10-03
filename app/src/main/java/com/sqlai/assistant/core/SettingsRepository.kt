@@ -119,7 +119,10 @@ data class AppSettings(
     val userInstructions: String = "",
     val geminiLiveVoice: Boolean = true,
     val liveVoiceName: String = "",
-    val liveModel: String = "gemini-live-2.5-flash-preview"
+    val liveModel: String = "gemini-live-2.5-flash-preview",
+    // ---- v7 M3 : on-device wake engine ----
+    val wakeEngine: String = "vosk",
+    val wakeModelLang: String = "en"
 ) {
     fun effectiveBaseUrl(): String =
         baseUrlOverride.trim().ifEmpty { provider.baseUrl }
@@ -182,6 +185,8 @@ class SettingsRepository(private val context: Context) {
         val GEMINI_LIVE_VOICE = booleanPreferencesKey("gemini_live_voice")
         val LIVE_VOICE_NAME = stringPreferencesKey("live_voice_name")
         val LIVE_MODEL = stringPreferencesKey("live_model")
+        val WAKE_ENGINE = stringPreferencesKey("wake_engine")
+        val WAKE_MODEL_LANG = stringPreferencesKey("wake_model_lang")
     }
 
     val settings: Flow<AppSettings> = dataStore.data.map { p ->
@@ -214,7 +219,9 @@ class SettingsRepository(private val context: Context) {
             userInstructions = p[Keys.USER_INSTRUCTIONS] ?: "",
             geminiLiveVoice = p[Keys.GEMINI_LIVE_VOICE] ?: true,
             liveVoiceName = p[Keys.LIVE_VOICE_NAME] ?: "",
-            liveModel = p[Keys.LIVE_MODEL] ?: "gemini-live-2.5-flash-preview"
+            liveModel = p[Keys.LIVE_MODEL] ?: "gemini-live-2.5-flash-preview",
+            wakeEngine = p[Keys.WAKE_ENGINE] ?: "vosk",
+            wakeModelLang = p[Keys.WAKE_MODEL_LANG] ?: "en"
         )
     }
 
@@ -282,6 +289,16 @@ class SettingsRepository(private val context: Context) {
     suspend fun setLiveVoiceName(value: String) = dataStore.edit { it[Keys.LIVE_VOICE_NAME] = value }
 
     suspend fun setLiveModel(value: String) = dataStore.edit { it[Keys.LIVE_MODEL] = value.trim() }
+
+    /** v7 M3: "vosk" (offline wake, auto-fallback) or "speech" (old STT loop). */
+    suspend fun setWakeEngine(value: String) = dataStore.edit {
+        it[Keys.WAKE_ENGINE] = if (value.equals("speech", ignoreCase = true)) "speech" else "vosk"
+    }
+
+    /** v7 M3: Vosk acoustic model language - "en" or "hi". */
+    suspend fun setWakeModelLang(value: String) = dataStore.edit {
+        it[Keys.WAKE_MODEL_LANG] = if (value.equals("hi", ignoreCase = true)) "hi" else "en"
+    }
 
     suspend fun resetPrompt() = dataStore.edit { it[Keys.SYSTEM_PROMPT] = AppSettings.DEFAULT_SYSTEM_PROMPT }
 }
