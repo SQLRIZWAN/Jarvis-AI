@@ -117,6 +117,13 @@ object GeminiLiveAudioEngine {
 
     @Volatile private var lastStreamAt = 0L
 
+    /**
+     * v7 M6 barge-in: while now < this deadline, incoming server audio is
+     * dropped (the tail of an aborted turn). Time-bounded on purpose - a
+     * duplex CALL session can never stay muted by a stale interrupt.
+     */
+    @Volatile private var dropAudioUntil = 0L
+
     // ------------------------------------------------------------------ public
 
     /** True when the Gemini Live voice can be used with the current settings. */
@@ -208,6 +215,20 @@ object GeminiLiveAudioEngine {
         playQueue.clear()
         AudioManagerController.exitCallAudioMode(context)
         recreateTrack()
+    }
+
+    /**
+     * v7 M6 BARGE-IN: fail the pending turn waiters (so [speakText] returns
+     * at once) and drain the playback track. Connection and mic loop are
+     * untouched - duplex call sessions survive; late audio of the aborted
+     * turn is dropped for 600 ms via [dropAudioUntil].
+     */
+    fun interruptPlayback() {
+        dropAudioUntil = System.currentTimeMillis() + 600
+        resolveWaits(false)
+        playQueue.clear()
+        trackFlush()
+        LogBus.log("[Live] playback interrupted (barge-in)", LogLevel.INFO)
     }
 
     /** Drop the WebSocket + audio pipelines (app shutdown). */
@@ -479,11 +500,13 @@ object GeminiLiveAudioEngine {
                 else -> return
             }
         }
-        data?.let {
-            if (playQueue.offer(it)) {
-                ensurePlayThread()
-            } else {
-                Log.w(TAG, "playback queue full - dropping chunk")
+        if (System.currentTimeMillis() >= dropAudioUntil) {
+            data?.let {
+                if (playQueue.offer(it)) {
+                    ensurePlayThread()
+                } else {
+                    Log.w(TAG, "playback queue full - dropping chunk")
+                }
             }
         }
     }

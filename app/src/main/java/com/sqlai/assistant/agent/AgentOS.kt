@@ -170,6 +170,9 @@ object AgentOS {
     private suspend fun handle(intent: Intent, source: String) {
         when (intent) {
             is Intent.Chat -> {
+                // v7 M6 barge-in: the user just spoke/typed - stale assistant
+                // speech must never talk over the new turn.
+                Speaker.interruptPlayback()
                 // v7 M4: a pending risky-action confirmation latches FIRST -
                 // plain words like "haan"/"nahi" answer the gate, not the LLM.
                 val confirm = pendingConfirm
@@ -217,6 +220,8 @@ object AgentOS {
                 }
                 StateBus.setState(AssistantState.PROCESSING)
                 StateBus.setCommand(intent.text)
+                // v7 M6: a fresh task starts in silence.
+                Speaker.interruptPlayback()
                 HistoryStore.addUser(intent.text)
                 try {
                     SQLAgentEngineV4.run(intent.text, source)
@@ -228,6 +233,8 @@ object AgentOS {
 
             Intent.Stop -> {
                 LogBus.log("[AgentOS] stop", LogLevel.WARN)
+                // v7 M6: stop means silence too.
+                Speaker.interruptPlayback()
                 pendingTask = null
                 if (SQLAgentEngineV4.isRunning()) {
                     SQLAgentEngineV4.cancel()

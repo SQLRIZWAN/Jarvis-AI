@@ -85,6 +85,14 @@ object Speaker {
     private val pendingLines = ArrayDeque<Pending>()
     private val signal = Channel<Unit>(Channel.CONFLATED)
     @Volatile private var queueEpoch = 0
+
+    /**
+     * v7 M6 barge-in epoch: [interruptPlayback] bumps it; an in-flight
+     * [speak] compares its captured value after every engine stage so an
+     * interrupted line NEVER falls through to the next voice engine (TTS
+     * would otherwise replay the cut text).
+     */
+    @Volatile private var playEpoch = 0
     @Volatile private var consumerStarted = false
     /**
      * G2: while false the consumer PAUSES (used around Gemini speakText so
@@ -107,18 +115,34 @@ object Speaker {
     }
 
     /**
-     * BUG #3: important line (task result / interrupt answer) - drops every
-     * stale pending line first so it speaks next.
+     * BUG #3: important line (task result / interrupt answer) - v7 M6:
+     * preempts BOTH the queued backlog AND the currently-speaking line, so
+     * the final result is heard immediately instead of "next".
      */
     fun postPriority(text: String) {
         if (text.isBlank()) return
-        synchronized(queueLock) {
-            val dropped = pendingLines.toList()
-            pendingLines.clear()
-            dropped.forEach { it.result?.complete(false) }
-            if (dropped.isNotEmpty()) LogBus.log("[Speaker] priority: dropped ${dropped.size} pending line(s)", LogLevel.INFO)
-        }
+        interruptPlayback()
         enqueue(text)
+    }
+
+    /**
+     * v7 M6 BARGE-IN: stop the CURRENTLY-speaking line (TTS or Gemini
+     * voice), drop every queued line and invalidate in-flight fallbacks.
+     * Cheap no-op when nothing is playing; safe from any thread.
+     */
+    fun interruptPlayback() {
+        flushQueued()
+        playEpoch++
+        pendingUtterances.values.forEach { it(false) }
+        pendingUtterances.clear()
+        try {
+            tts?.stop()
+        } catch (e: Exception) {
+            Log.w(TAG, "interrupt tts failed", e)
+        }
+        GeminiMaleVoiceStreamer.interruptPlayback()
+        GeminiLiveAudioEngine.interruptPlayback()
+        LogBus.log("[Speaker] playback interrupted (barge-in)", LogLevel.INFO)
     }
 
     private fun enqueue(text: String, result: kotlinx.coroutines.CompletableDeferred<Boolean>? = null) {
@@ -276,6 +300,8 @@ object Speaker {
         if (text.isBlank()) return
         val settings = SqlAiApp.settings.settings.first()
         if (!settings.ttsEnabled) return
+        // v7 M6: barge-in guard - captured BEFORE playback starts.
+        val epoch = playEpoch
 
         // v6.0: release the STT mic cleanly BEFORE any playback route runs
         // (TTS/Gemini). fastRearm/watchdog re-arm it after speech ends.
@@ -292,6 +318,8 @@ object Speaker {
                 setLiveSpeaking(false)
             }
             if (ok) return
+            // v7 M6: interrupted mid-play - do NOT fall through to the next engine.
+            if (epoch != playEpoch) return
         }
 
         // ---- preferred 2: Gemini Live engine (call / duplex contexts) -----
@@ -303,6 +331,7 @@ object Speaker {
                 setLiveSpeaking(false)
             }
             if (ok) return
+            if (epoch != playEpoch) return
             LogBus.log("Gemini voices unavailable - Android TTS last resort", LogLevel.WARN)
         }
 
@@ -326,6 +355,8 @@ object Speaker {
                 (settings.ttsSpeed * 1.2f).coerceAtMost(1.8f)
             } else settings.ttsSpeed
             engine.setSpeechRate(rate)
+            // v7 M6: barge-in may have landed while we waited for the engine.
+            if (epoch != playEpoch) return
             engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "sqlai-${nextId()}")
         } catch (e: Exception) {
             LogBus.log("TTS error: ${e.message}", LogLevel.WARN)

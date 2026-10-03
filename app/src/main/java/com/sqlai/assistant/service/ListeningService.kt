@@ -556,6 +556,9 @@ class ListeningService : Service() {
             isListening = true
             listeningSince = System.currentTimeMillis()
             StateBus.setState(AssistantState.LISTENING)
+            // v7 M6 barge-in: the mic now captures USER speech - cut any
+            // remaining assistant audio so the two never fight the speaker.
+            Speaker.interruptPlayback()
         } catch (e: Exception) {
             isListening = false
             AudioManagerController.releaseMic(AudioManagerController.MicOwner.STT)

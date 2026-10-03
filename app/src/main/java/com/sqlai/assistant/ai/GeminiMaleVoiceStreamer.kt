@@ -91,6 +91,14 @@ object GeminiMaleVoiceStreamer {
     private var playThread: Thread? = null
     private val playing = AtomicBoolean(false)
 
+    /**
+     * v7 M6 barge-in latch: false while an interrupt drains playback. Late
+     * server audio is dropped and an aborted turn is never retried; the next
+     * [speak] entry re-opens the gate.
+     */
+    @Volatile
+    private var playEnabled = true
+
     /** True when the male Gemini streamer can serve speech for these settings. */
     fun isUsable(settings: AppSettings): Boolean =
         settings.geminiLiveVoice &&
@@ -103,6 +111,7 @@ object GeminiMaleVoiceStreamer {
      */
     suspend fun speak(settings: AppSettings, text: String): Boolean {
         if (text.isBlank() || !isUsable(settings)) return false
+        playEnabled = true // v7 M6: open the gate for this turn
         // Never talk over an active in-call / live duplex session - the Live
         // engine owns those audio routes.
         if (AudioManagerController.isCallMode() ||
@@ -116,6 +125,9 @@ object GeminiMaleVoiceStreamer {
             val first = sendTurn(settings, text, retryVoice = MALE_VOICE)
             if (first) {
                 true
+            } else if (!playEnabled) {
+                // v7 M6: barge-in aborted this turn - NEVER retry into it.
+                false
             } else {
                 // One full retry: fresh socket, alternate male voice.
                 closeQuietly()
@@ -140,8 +152,9 @@ object GeminiMaleVoiceStreamer {
             LogBus.log("Male voice stream send failed: ${e.message}", LogLevel.WARN)
             false
         }
-        if (!ok) {
+        if (!ok && playEnabled) {
             // Server never completed the turn - the socket is untrustworthy.
+            // (After a barge-in the socket is fine, just aborted - keep warm.)
             closeQuietly()
         }
         return ok
@@ -216,6 +229,33 @@ object GeminiMaleVoiceStreamer {
         socket = null
         connected = false
         setupDone = false
+    }
+
+    /**
+     * v7 M6 BARGE-IN: abort the current turn and drain all queued audio so
+     * the user's microphone wins immediately. The WebSocket stays warm (no
+     * reconnect cost for the next line) and [playEnabled] drops any late
+     * server audio for this aborted turn.
+     */
+    fun interruptPlayback() {
+        playEnabled = false
+        turnWaiters.forEach { it.complete(false) }
+        turnWaiters.clear()
+        playQueue.clear()
+        playing.set(false)
+        try {
+            playThread?.interrupt()
+        } catch (e: Exception) {
+            // Ignore.
+        }
+        playThread = null
+        try {
+            track?.pause()
+            track?.flush()
+        } catch (e: Exception) {
+            // Ignore.
+        }
+        LogBus.log("[MaleVoice] playback interrupted (barge-in)", LogLevel.INFO)
     }
 
     fun shutdown() {
@@ -386,6 +426,7 @@ object GeminiMaleVoiceStreamer {
                 else -> return
             }
         }
+        if (!playEnabled) return // v7 M6: aborted turn - drop late server audio
         data?.let {
             if (playQueue.offer(it)) ensurePlayThread()
         }
