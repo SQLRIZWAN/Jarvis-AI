@@ -9,7 +9,7 @@ taps, swipes and typing for you.
 | | |
 |---|---|
 | Repository | `Jarvis-AI` |
-| App name | **SQL AI v6.0 Pro** (dynamic, version-stamped) |
+| App name | **SQL AI v7.0 Pro** (dynamic, version-stamped) |
 | Package | `com.sqlai.assistant` |
 | Language | Kotlin + Jetpack Compose |
 | Min SDK | 26 (Android 8.0) |
@@ -17,6 +17,39 @@ taps, swipes and typing for you.
 | License | MIT |
 
 ---
+
+## What's new in v7.0
+
+Multi-Agent Android Operator - v6.0 ka rewrite: ek hi blind LLM loop ki jagah
+ab system of specialists hai jo device pe safely, resumably chalta hai:
+
+- **AgentOS + Blackboard** - `AgenticLoopEngine` delete hoke ek orchestrator
+  ban gaya (intent routing, task queue, uiMutex, confirm gate, pending-task
+  drain). Chat aur Task ab alag-alag chalte hain: user task ke beech baat
+  kare to ConversationAgent turant bolta hai, Loop B background me chalta
+  rehta hai (BUG #5).
+- **Semantic taps + vision** - `tap {ref}` pe LLM ab coordinate guess nahi
+  karta: accessibility dump `r0..rN` refs deta hai, model ref bhejta hai,
+  service usi element ko tap karta hai; har think() ke saath fresh screenshot
+  (BUG #6) + CriticAgent pre-validate/confirm risky actions + deterministic
+  7-rung recovery ladder (BUG #8) + FlowMacros shortcut.
+- **Vosk wake word (offline)** - "SQL" hamesha sunne wala local Kaldi/Vosk
+  engine (model download + CRC + mic ownership), legacy STT fallback ke saath;
+  mic kabhi stuck nahi rehta (BUG #7).
+- **Journal resume** - har task ek `TaskJournal` me milestones + position
+  (step/package/action/screenHash) + `LAST FAILURE` ke saath persist hota hai;
+  crash/stop/fail ke baad wahi jagah se resume, kabhi step 1 se nahi. No-progress
+  20 steps pe task cleanly fail hota hai screenshot ke saath (BUG #4).
+- **Barge-in / interrupt** - user bole to TTS + Gemini stream/live dono turant
+  cut jaate hain (epoch-guarded), listening start karte hi playback rukta hai.
+- **GuardAgent (prompt-injection defence)** - screen dump aur chat input ke
+  dangerous lines (`ignore previous instructions`, role-reassign, jailbreak...)
+  model tak pahunchne se pehle strip ho jaate hain + dashboard counter (BUG #9).
+- **SelfTestSuite (40 on-device checks)** - journal/router/parser/flow/wake/
+  critic/pool/guard contracts ek tap pe dashboard pe green/red (BUG #10);
+  failed checks naam se dikhte hain, "Re-run checks" button.
+- **CI now runs unit tests + lint** before assembling the APK, version
+  **7.0 (versionCode 12)**.
 
 ## What's new in v6.0
 

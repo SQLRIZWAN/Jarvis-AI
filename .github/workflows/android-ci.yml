@@ -48,6 +48,9 @@ jobs:
             echo "No keystore secret - falling back to debug key (upgrades may fail)"
           fi
 
+      - name: Run unit tests + lint
+        run: ./gradlew testDebugUnitTest lintDebug --no-daemon --stacktrace
+
       - name: Build debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 

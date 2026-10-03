@@ -12,8 +12,8 @@ android {
         applicationId = "com.sqlai.assistant"
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
-        versionName = "6.0"
+        versionCode = 12
+        versionName = "7.0"
 
         // Dynamic launcher label: version-stamped app name, single source of
         // truth (strings.xml no longer defines app_name - duplicate resource
