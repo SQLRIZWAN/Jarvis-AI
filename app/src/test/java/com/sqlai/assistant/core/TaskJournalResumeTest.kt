@@ -2,6 +2,7 @@ package com.sqlai.assistant.core
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -50,6 +51,43 @@ class TaskJournalResumeTest {
 
         assertEquals(listOf("Open Instagram", "Open profile"), retry.completed)
         assertEquals(listOf("Tap heart"), retry.remaining)
+    }
+
+    @Test
+    fun failedStatusResumesFreshAndFlipsBackToRunning() {
+        val first = TaskJournal.resume(null, "open settings", listOf("a", "b"), t0)
+        val progressed = TaskJournal.withMilestone(first, "a", t0 + 100)
+        val failed = progressed.copy(
+            status = TaskJournal.STATUS_FAILED,
+            failReason = "no progress after 20 attempts",
+            updatedAt = t0 + 200
+        )
+
+        val retry = TaskJournal.resume(failed, "open settings", listOf("a", "b"), t0 + 300)
+
+        assertEquals(first.taskId, retry.taskId)
+        assertEquals(TaskJournal.STATUS_RUNNING, retry.status)
+        assertNull(retry.failReason)
+        assertEquals(listOf("a"), retry.completed)
+        assertEquals(listOf("b"), retry.remaining)
+    }
+
+    @Test
+    fun staleFailedJournalOlderThan24hStartsNewOne() {
+        val failed = TaskJournal.resume(null, "old", listOf("g1"), t0)
+            .copy(
+                status = TaskJournal.STATUS_FAILED,
+                failReason = "stuck",
+                updatedAt = t0
+            )
+
+        val next = TaskJournal.resume(
+            failed, "old", listOf("g1"), t0 + 25 * 60 * 60 * 1000L
+        )
+
+        assertTrue(next.completed.isEmpty())
+        assertNull(next.failReason)
+        assertNotEquals(failed.taskId, next.taskId)
     }
 
     @Test

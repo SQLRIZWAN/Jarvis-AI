@@ -53,4 +53,16 @@ class IntentRouterTest {
         // Nothing running -> the text itself goes to the operator (chat/task).
         assertTrue(IntentRouter.route("stop", false) is IntentRouter.Route.RunTask)
     }
+
+    @Test
+    fun riskyGateAnswerWordsRouteToChatWhileRunning() {
+        // v7 M4: the haan/nahi voice gate latches on Intent.Chat - these
+        // words must never become QueueTask/Cancel while a task is running.
+        for (word in listOf("haan", "nahi", "yes", "no", "sure", "skip", "ok", "nope")) {
+            assertTrue(
+                "expected Chat for \"$word\"",
+                IntentRouter.route(word, true) is IntentRouter.Route.Chat
+            )
+        }
+    }
 }

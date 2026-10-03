@@ -80,6 +80,15 @@ fun ApiConfigScreen() {
 
     val currentProviderValue = settings?.provider ?: AiProvider.GROQ
 
+    // Auto-pick the newest flash model when the saved one is blank/unknown.
+    fun autoSelectGeminiModel(fetched: List<GeminiModel>) {
+        if (fetched.isEmpty()) return
+        if (model.isNotBlank() && fetched.any { it.id == model }) return
+        val best = GeminiModelFetcher.pickBestFlash(fetched) ?: return
+        model = best
+        scope.launch { SqlAiApp.settings.setModel(best) }
+    }
+
     LaunchedEffect(currentProviderValue, settings?.apiKey) {
         val key = settings?.apiKey.orEmpty()
         if (currentProviderValue == AiProvider.GEMINI &&
@@ -90,6 +99,7 @@ fun ApiConfigScreen() {
             try {
                 geminiModels = GeminiModelFetcher.fetch(key)
                 modelFetchError = null
+                autoSelectGeminiModel(geminiModels)
                 LogBus.log("Loaded ${geminiModels.size} Gemini models", LogLevel.SUCCESS)
             } catch (e: Exception) {
                 modelFetchError = e.message
@@ -212,6 +222,7 @@ fun ApiConfigScreen() {
                                 try {
                                     geminiModels = GeminiModelFetcher.fetch(apiKey)
                                     modelFetchError = null
+                                    autoSelectGeminiModel(geminiModels)
                                     LogBus.log(
                                         "Loaded ${geminiModels.size} Gemini models",
                                         LogLevel.SUCCESS

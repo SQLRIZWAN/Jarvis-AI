@@ -101,28 +101,180 @@ class SqlAccessibilityService : AccessibilityService() {
         }
     }
 
+    /** One captured element: raw fields + on-screen bounds (v7 M4 refs). */
+    private data class DetailedEntry(
+        val text: String,
+        val desc: String,
+        val clickable: Boolean,
+        val editable: Boolean,
+        val scrollable: Boolean,
+        val checkable: Boolean,
+        val checked: Boolean,
+        val rect: android.graphics.Rect
+    ) {
+        val label: String
+            get() = when {
+                text.isNotEmpty() && desc.isNotEmpty() && text != desc -> "\"$text\" desc=\"$desc\""
+                text.isNotEmpty() -> "\"$text\""
+                else -> "desc=\"$desc\""
+            }
+
+        val flags: String
+            get() = buildString {
+                if (clickable) append("clickable ")
+                if (editable) append("editable ")
+                if (scrollable) append("scrollable ")
+                if (checkable) append(if (checked) "checked" else "unchecked")
+            }.trim()
+    }
+
+    /** Bounds captured by the LAST detailed capture, keyed by stable ref id. */
+    @Volatile private var lastRefRects: Map<String, android.graphics.Rect> = emptyMap()
+
+    /** v7 M4: bounds for a stable ref id (null = unknown/stale ref). */
+    fun resolveRef(ref: String): android.graphics.Rect? = lastRefRects[ref]
+
     /**
-     * Agent-grade screen dump: every interactive element with its on-screen
-     * bounds so the LLM can reason about positions and tap exact coordinates.
+     * Agent-grade screen dump: every interactive element with stable ref ids
+     * (r0, r1, ... sorted top-to-bottom then left-to-right) + bounds so the
+     * LLM can address elements by id and tap {ref} resolves them later.
      */
     fun captureScreenDetailed(maxItems: Int = 60): String {
+        val (pkg, entries) = collectDetailedEntries()
+            ?: return "Screen unavailable (accessibility off)"
+        val taken = entries.take(maxItems)
+        val refs = LinkedHashMap<String, android.graphics.Rect>(taken.size)
+        val body = buildString {
+            taken.forEachIndexed { i, e ->
+                val ref = "r$i"
+                refs[ref] = android.graphics.Rect(e.rect)
+                if (i > 0) append('\n')
+                append(ref).append(' ').append(e.label)
+                append(" [").append(e.rect.left).append(',').append(e.rect.top)
+                append(' ').append(e.rect.width()).append('x').append(e.rect.height())
+                if (e.flags.isNotEmpty()) append(' ').append(e.flags)
+            }
+        }
+        lastRefRects = refs
+        return "FOREGROUND_APP=$pkg\n$body"
+    }
+
+    /**
+     * v7 M4 structured variant: the same ref-indexed elements as JSON
+     * ([{"ref":"r0","label":"Send","x":..,"y":..,"w":..,"h":..,"clickable":true,...}]).
+     * Updates the ref table exactly like [captureScreenDetailed].
+     */
+    fun captureScreenJson(maxItems: Int = 60): String {
+        val (pkg, entries) = collectDetailedEntries()
+            ?: return """{"error":"Screen unavailable (accessibility off)"}"""
+        val taken = entries.take(maxItems)
+        val refs = LinkedHashMap<String, android.graphics.Rect>(taken.size)
+        val arr = org.json.JSONArray()
+        taken.forEachIndexed { i, e ->
+            val ref = "r$i"
+            refs[ref] = android.graphics.Rect(e.rect)
+            arr.put(
+                org.json.JSONObject()
+                    .put("ref", ref)
+                    .put("label", e.label)
+                    .put("x", e.rect.left)
+                    .put("y", e.rect.top)
+                    .put("w", e.rect.width())
+                    .put("h", e.rect.height())
+                    .put("clickable", e.clickable)
+                    .put("editable", e.editable)
+                    .put("scrollable", e.scrollable)
+            )
+        }
+        lastRefRects = refs
+        return org.json.JSONObject().put("app", pkg).put("elements", arr).toString()
+    }
+
+    /**
+     * v7 M4: click by stable ref. Re-walks the CURRENT tree for a node that
+     * still matches the captured bounds (must be on-screen + visible), climbs
+     * to a clickable ancestor for ACTION_CLICK, falls back to a coordinate
+     * tap at the stored centre ONLY while that rect is still on-screen.
+     * Unknown/stale refs return false - never a blind or stale tap (BUG #8).
+     */
+    suspend fun clickRef(ref: String): Boolean {
+        val rect = resolveRef(ref) ?: return false
+        if (rect.isEmpty) return false
+        val dm = resources.displayMetrics
+        if (rect.centerX() !in 0..dm.widthPixels ||
+            rect.centerY() !in 0..dm.heightPixels
+        ) {
+            return false
+        }
         val root = try {
             rootInActiveWindow
         } catch (e: Exception) {
             null
-        } ?: return "Screen unavailable (accessibility off)"
+        } ?: return false
 
+        fun walk(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
+            if (depth > 30) return null
+            val r = android.graphics.Rect()
+            try {
+                node.getBoundsInScreen(r)
+            } catch (e: Exception) {
+                return null
+            }
+            if (r == rect) return node
+            if (!r.isEmpty && r.contains(rect.centerX(), rect.centerY()) &&
+                (node.isClickable || node.isEditable)
+            ) {
+                return node
+            }
+            for (i in 0 until node.childCount) {
+                val child = try {
+                    node.getChild(i)
+                } catch (e: Exception) {
+                    null
+                } ?: continue
+                walk(child, depth + 1)?.let { return it }
+            }
+            return null
+        }
+
+        val target = walk(root, 0) ?: return false
+        if (!target.isVisibleToUser) return false
+        var clickable: AccessibilityNodeInfo? = target
+        while (clickable != null && !clickable.isClickable) {
+            clickable = clickable.parent
+        }
+        if (clickable != null) {
+            val performed = try {
+                clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            } catch (e: Exception) {
+                false
+            }
+            if (performed) return true
+        }
+        return tap(rect.centerX(), rect.centerY())
+    }
+
+    /** Walk + sort + dedupe shared by the text and JSON dump variants. */
+    private fun collectDetailedEntries(): Pair<String, List<DetailedEntry>>? {
+        val root = try {
+            rootInActiveWindow
+        } catch (e: Exception) {
+            null
+        } ?: return null
         val pkg = root.packageName?.toString() ?: "unknown"
-        val lines = mutableListOf<String>()
+        val entries = mutableListOf<DetailedEntry>()
         val seen = HashSet<String>()
-        collectDetailed(root, lines, seen, 0)
-        val body = lines.take(maxItems).joinToString("\n")
-        return "FOREGROUND_APP=$pkg\n$body"
+        collectDetailed(root, entries, seen, 0)
+        // Stable ordering: top-to-bottom, then left-to-right, then label.
+        val sorted = entries.sortedWith(
+            compareBy({ it.rect.top }, { it.rect.left }, { it.label })
+        )
+        return pkg to sorted
     }
 
     private fun collectDetailed(
         node: AccessibilityNodeInfo,
-        out: MutableList<String>,
+        out: MutableList<DetailedEntry>,
         seen: HashSet<String>,
         depth: Int
     ) {
@@ -141,18 +293,18 @@ class SqlAccessibilityService : AccessibilityService() {
         if ((text.isNotEmpty() || desc.isNotEmpty() || isInteractive) && !rect.isEmpty) {
             val key = "$text|$desc|${rect.left},${rect.top}"
             if (seen.add(key)) {
-                val flags = buildString {
-                    if (node.isClickable) append("clickable ")
-                    if (node.isEditable) append("editable ")
-                    if (node.isScrollable) append("scrollable ")
-                    if (node.isCheckable) append(if (node.isChecked) "checked" else "unchecked")
-                }.trim()
-                val label = when {
-                    text.isNotEmpty() && desc.isNotEmpty() && text != desc -> "\"$text\" desc=\"$desc\""
-                    text.isNotEmpty() -> "\"$text\""
-                    else -> "desc=\"$desc\""
-                }
-                out.add("$label [${rect.left},${rect.top} ${rect.width()}x${rect.height()}] $flags")
+                out.add(
+                    DetailedEntry(
+                        text = text,
+                        desc = desc,
+                        clickable = node.isClickable,
+                        editable = node.isEditable,
+                        scrollable = node.isScrollable,
+                        checkable = node.isCheckable,
+                        checked = node.isChecked,
+                        rect = rect
+                    )
+                )
             }
         }
 

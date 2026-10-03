@@ -22,7 +22,9 @@ data class Action(
     val on: Boolean? = null,
     val item: String? = null,
     val ms: Int? = null,
-    val message: String? = null
+    val message: String? = null,
+    /** v7 M4: stable screen element id ("r0".."rN") from the LIVE SCREEN dump. */
+    val ref: String? = null
 )
 
 data class Plan(
@@ -74,7 +76,8 @@ object PlanParser {
                     on = a.optBooleanOrNull("on"),
                     item = a.optStringOrNull("item"),
                     ms = a.optIntOrNull("ms"),
-                    message = a.optStringOrNull("message")
+                    message = a.optStringOrNull("message"),
+                    ref = a.optStringOrNull("ref")
                 )
             )
         }

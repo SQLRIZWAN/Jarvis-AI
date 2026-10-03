@@ -64,7 +64,7 @@ enum class AiProvider(val label: String, val defaultModel: String, val baseUrl: 
 
     companion object {
         fun fromName(name: String?): AiProvider =
-            entries.firstOrNull { it.name == name } ?: GROQ
+            entries.firstOrNull { it.name == name } ?: GEMINI
     }
 }
 
@@ -91,9 +91,9 @@ enum class VoiceGender(val code: String, val label: String) {
 }
 
 data class AppSettings(
-    val provider: AiProvider = AiProvider.GROQ,
+    val provider: AiProvider = AiProvider.GEMINI,
     val apiKey: String = "",
-    val model: String = AiProvider.GROQ.defaultModel,
+    val model: String = AiProvider.GEMINI.defaultModel,
     val baseUrlOverride: String = "",
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     val wakeWord: String = "sql",
@@ -122,8 +122,15 @@ data class AppSettings(
     val liveModel: String = "gemini-live-2.5-flash-preview",
     // ---- v7 M3 : on-device wake engine ----
     val wakeEngine: String = "vosk",
-    val wakeModelLang: String = "en"
+    val wakeModelLang: String = "en",
+    // ---- v7 M4 : provider failover pool + risky-action confirm ----
+    val providerKeys: Map<String, String> = emptyMap(),
+    val confirmRisky: Boolean = true
 ) {
+    /** Failover key lookup: secondary providers use [providerKeys], primary falls back to [apiKey]. */
+    fun keyFor(provider: AiProvider): String =
+        providerKeys[provider.name] ?: if (provider == this.provider) apiKey else ""
+
     fun effectiveBaseUrl(): String =
         baseUrlOverride.trim().ifEmpty { provider.baseUrl }
 
@@ -187,6 +194,8 @@ class SettingsRepository(private val context: Context) {
         val LIVE_MODEL = stringPreferencesKey("live_model")
         val WAKE_ENGINE = stringPreferencesKey("wake_engine")
         val WAKE_MODEL_LANG = stringPreferencesKey("wake_model_lang")
+        val PROVIDER_KEYS = stringPreferencesKey("provider_keys")
+        val CONFIRM_RISKY = booleanPreferencesKey("confirm_risky")
     }
 
     val settings: Flow<AppSettings> = dataStore.data.map { p ->
@@ -221,8 +230,26 @@ class SettingsRepository(private val context: Context) {
             liveVoiceName = p[Keys.LIVE_VOICE_NAME] ?: "",
             liveModel = p[Keys.LIVE_MODEL] ?: "gemini-live-2.5-flash-preview",
             wakeEngine = p[Keys.WAKE_ENGINE] ?: "vosk",
-            wakeModelLang = p[Keys.WAKE_MODEL_LANG] ?: "en"
+            wakeModelLang = p[Keys.WAKE_MODEL_LANG] ?: "en",
+            providerKeys = parseProviderKeys(p[Keys.PROVIDER_KEYS]),
+            confirmRisky = p[Keys.CONFIRM_RISKY] ?: true
         )
+    }
+
+    /** JSON object string -> Map (blank/corrupt -> empty, never throws). */
+    private fun parseProviderKeys(raw: String?): Map<String, String> {
+        if (raw.isNullOrBlank()) return emptyMap()
+        return try {
+            val obj = org.json.JSONObject(raw)
+            buildMap {
+                for (key in obj.keys()) {
+                    val value = obj.optString(key)
+                    if (!value.isNullOrBlank()) put(key, value)
+                }
+            }
+        } catch (e: Exception) {
+            emptyMap()
+        }
     }
 
     suspend fun setProvider(provider: AiProvider) = dataStore.edit {
@@ -298,6 +325,22 @@ class SettingsRepository(private val context: Context) {
     /** v7 M3: Vosk acoustic model language - "en" or "hi". */
     suspend fun setWakeModelLang(value: String) = dataStore.edit {
         it[Keys.WAKE_MODEL_LANG] = if (value.equals("hi", ignoreCase = true)) "hi" else "en"
+    }
+
+    /** v7 M4: per-provider API key for the failover pool ("" removes it). */
+    suspend fun setProviderKey(provider: AiProvider, value: String) = dataStore.edit { prefs ->
+        val obj = try {
+            org.json.JSONObject(prefs[Keys.PROVIDER_KEYS] ?: "{}")
+        } catch (e: Exception) {
+            org.json.JSONObject()
+        }
+        if (value.isBlank()) obj.remove(provider.name) else obj.put(provider.name, value.trim())
+        prefs[Keys.PROVIDER_KEYS] = obj.toString()
+    }
+
+    /** v7 M4: voice-confirm gate for risky actions (delete/pay/send...). */
+    suspend fun setConfirmRisky(value: Boolean) = dataStore.edit {
+        it[Keys.CONFIRM_RISKY] = value
     }
 
     suspend fun resetPrompt() = dataStore.edit { it[Keys.SYSTEM_PROMPT] = AppSettings.DEFAULT_SYSTEM_PROMPT }

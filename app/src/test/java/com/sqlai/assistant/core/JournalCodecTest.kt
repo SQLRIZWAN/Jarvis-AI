@@ -54,6 +54,31 @@ class JournalCodecTest {
     }
 
     @Test
+    fun failReasonSurvivesRoundTrip() {
+        val original = sampleJournal().copy(
+            status = TaskJournal.STATUS_FAILED,
+            failReason = "no progress after 20 attempts"
+        )
+
+        val decoded = TaskJournal.decode(TaskJournal.encode(original))
+
+        assertEquals(original, decoded)
+        assertEquals("no progress after 20 attempts", decoded!!.failReason)
+    }
+
+    @Test
+    fun legacyJsonWithoutFailReasonStillDecodes() {
+        // pre-v7 M4 payloads carry no failReason key at all.
+        val legacy =
+            """{"taskId":"t","task":"old task","createdAt":1,"updatedAt":2,"status":"running"}"""
+
+        val decoded = TaskJournal.decode(legacy)
+
+        assertEquals("old task", decoded!!.task)
+        assertNull(decoded.failReason)
+    }
+
+    @Test
     fun blankInputReturnsNull() {
         assertNull(TaskJournal.decode(null))
         assertNull(TaskJournal.decode(""))

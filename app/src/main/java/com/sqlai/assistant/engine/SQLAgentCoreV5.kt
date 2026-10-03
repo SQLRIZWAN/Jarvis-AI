@@ -2,6 +2,9 @@ package com.sqlai.assistant.engine
 
 import android.graphics.Bitmap
 import com.sqlai.assistant.SqlAiApp
+import com.sqlai.assistant.agent.AgentOS
+import com.sqlai.assistant.agent.CriticAgent
+import com.sqlai.assistant.ai.Action
 import com.sqlai.assistant.ai.AgentParser
 import com.sqlai.assistant.ai.AiClient
 import com.sqlai.assistant.ai.ChatMessage
@@ -13,6 +16,7 @@ import com.sqlai.assistant.core.ScreenshotLog
 import com.sqlai.assistant.core.StateBus
 import com.sqlai.assistant.core.TaskStateManager
 import com.sqlai.assistant.device.DeviceController
+import com.sqlai.assistant.device.FlowMacros
 import com.sqlai.assistant.service.BlockerSweeper
 import com.sqlai.assistant.service.SqlAccessibilityService
 import kotlinx.coroutines.Dispatchers
@@ -63,9 +67,8 @@ object SQLAgentCoreV5 {
     private const val MAX_THOUGHT_LOG = 180
     private const val THINK_TIMEOUT_MS = 25_000L
     private const val DECOMPOSE_TIMEOUT_MS = 15_000L
-
-    /** After this many consecutive soft-fails, force BACK to escape. */
-    private const val BACK_EVERY_N_STUCK = 4
+    private const val RECOVERY_RUNG_TIMEOUT_MS = 15_000L
+    private const val CONFIRM_TIMEOUT_MS = 8_000L
 
     private const val DECOMPOSE_SYSTEM =
         "You are a task planner. Split the user's goal into short ordered micro-goals " +
@@ -92,6 +95,21 @@ object SQLAgentCoreV5 {
 
         lastStateRefresh = 0L
         LogBus.log("[$source] V5 agent started: \"$task\"", LogLevel.SUCCESS)
+
+        // ---- v7 M4: deterministic flows run BEFORE any LLM round-trip.
+        val flowMatch = FlowMacros.match(task)
+        if (flowMatch != null) {
+            LogBus.log("[FLOW] matched ${flowMatch.macro.name}", LogLevel.SUCCESS)
+            announce("Running flow ${flowMatch.macro.name}")
+            if (FlowMacros.run(flowMatch, announce)) {
+                LogBus.log("[FLOW] ${flowMatch.macro.name} complete", LogLevel.SUCCESS)
+                StateBus.setState(AssistantState.IDLE)
+                Speaker.postPriority("Done.")
+                return
+            }
+            announce("Flow did not finish - continuing step by step")
+        }
+
         ScreenshotLog.nextTask()
         val conversation = ArrayList<ChatMessage>()
         conversation.add(ChatMessage("user", "TASK: $task"))
@@ -163,10 +181,26 @@ object SQLAgentCoreV5 {
                         screenContext = null,
                         history = conversation,
                         imageJpeg = image,
-                        systemPromptOverride = CorePromptBuilder.agent(settings)
+                        systemPromptOverride = CorePromptBuilder.agent(settings),
+                        requireJson = true
                     )
                 } ?: throw java.util.concurrent.TimeoutException("think timeout")
             } catch (e: Exception) {
+                if (e.message?.contains("PARSE_ERROR") == true) {
+                    // v7 M4: one repair already failed inside AiClient - feed
+                    // the failure back so the next turn emits valid JSON only.
+                    LogBus.log("Agent reply was not valid JSON - sending repair feedback", LogLevel.WARN)
+                    conversation.add(
+                        ChatMessage(
+                            "user",
+                            "PARSE_ERROR: your last reply was not a valid JSON plan. Reply with " +
+                                "EXACTLY one raw JSON object {thought, reply, done, actions, expect} " +
+                                "and nothing else - no prose, no markdown."
+                        )
+                    )
+                    trim(conversation)
+                    continue
+                }
                 aiErrors++
                 LogBus.log("Agent AI error ($aiErrors/$AI_ERROR_LIMIT): ${e.message}", LogLevel.ERROR)
                 if (aiErrors >= AI_ERROR_LIMIT) {
@@ -191,6 +225,8 @@ object SQLAgentCoreV5 {
             // ---- ACT (15 s watchdog - NEVER freezes; long actions get more)
             var timedOut = false
             var delta = false
+            var criticSkipReason: String? = null
+            var recoveryHint = ""
             val actions = plan.actions
             if (actions.isNotEmpty()) {
                 LogBus.log("Act #$step: ${actions.size} action(s)", LogLevel.INFO)
@@ -199,12 +235,45 @@ object SQLAgentCoreV5 {
                 if (softStuck || step % 3 == 1) {
                     BlockerSweeper.sweep(accessibility, screen)
                 }
+
+                // ---- v7 M4 CRITIC: pre-validate + risky-action voice gate ----
+                val pre = CriticAgent.preValidate(plan, screen)
+                pre.problems.forEach { LogBus.log("[CRITIC] $it", LogLevel.WARN) }
+                var exec = actions.filter { CriticAgent.isValid(it) }
+                val dropped = actions.size - exec.size
+                if (dropped > 0) {
+                    LogBus.log("[CRITIC] dropped $dropped invalid action(s)", LogLevel.WARN)
+                }
+                val risky = exec.filter(CriticAgent::needsConfirm)
+                if (risky.isNotEmpty() && settings.confirmRisky) {
+                    val confirmed = AgentOS.askConfirm(
+                        "This step will ${risky.first().type.replace('_', ' ')}. " +
+                            "Say haan to confirm, nahi to skip.",
+                        CONFIRM_TIMEOUT_MS
+                    )
+                    if (!confirmed) {
+                        exec = exec.filterNot(CriticAgent::needsConfirm)
+                        criticSkipReason =
+                            "USER DECLINED the risky action - do NOT retry it, take a different path."
+                        LogBus.log("[CRITIC] risky action declined by user", LogLevel.WARN)
+                    }
+                }
+                if (exec.isEmpty()) {
+                    if (criticSkipReason == null) {
+                        criticSkipReason =
+                            "ALL your actions were invalid - fix the action JSON fields first."
+                    }
+                    noProgressStreak++
+                    stuckStreak++
+                    LogBus.log("Nothing left to execute after the critic gate", LogLevel.WARN)
+                } else {
+
                 val budgetMs =
-                    if (actions.any { it.type in LONG_ACTIONS }) LONG_STEP_TIMEOUT_MS
+                    if (exec.any { it.type in LONG_ACTIONS }) LONG_STEP_TIMEOUT_MS
                     else STEP_TIMEOUT_MS
                 val outcome = withTimeoutOrNull(budgetMs) {
                     withContext(Dispatchers.IO) {
-                        DeviceController.execute(actions)
+                        DeviceController.execute(exec)
                     }
                     // Short settle so animations commit before we compare.
                     delay(250)
@@ -212,7 +281,9 @@ object SQLAgentCoreV5 {
                     // next think() sees FRESH pixels, not the pre-action shot.
                     accessibility.invalidateShotCache()
                     val after = accessibility.captureScreenDetailed(70)
-                    after != screen
+                    // v7 M4: order-independent hash - dump order noise can
+                    // never fake (or hide) a real UI change.
+                    CriticAgent.screenHash(after) != CriticAgent.screenHash(screen)
                 }
                 if (outcome == null) {
                     timedOut = true
@@ -225,18 +296,9 @@ object SQLAgentCoreV5 {
                     // FEATURE #2: keep a screenshot of every blocked step.
                     ScreenshotLog.captureAndSave("Step_${step}_TIMEOUT")
                     // FEATURE #1: auto-dismiss the blocker that froze the step.
-                    val healed = BlockerSweeper.recover(accessibility)
+                    BlockerSweeper.recover(accessibility)
                     if (stuckStreak == 2) {
                         announce("That step stalled - trying another way")
-                    }
-                    // Escape hatch: press BACK out of dead-ends/dialogs.
-                    if (!healed && stuckStreak % BACK_EVERY_N_STUCK == 0) {
-                        withContext(Dispatchers.IO) {
-                            accessibility.globalBack()
-                            delay(400)
-                        }
-                        LogBus.log("Recovery: pressed BACK after $stuckStreak stalled steps", LogLevel.WARN)
-                        announce("Let me go back and try differently")
                     }
                 } else {
                     delta = outcome
@@ -250,9 +312,15 @@ object SQLAgentCoreV5 {
                     // G1: save a step screenshot ONLY on failure - successful
                     // steps skip it (2 captures/step -> 1/step; timeouts keep theirs).
                     if (!delta || stuckStreak > 0) {
-                        ScreenshotLog.captureAndSave("Step_${step}_${actions.first().type}")
+                        ScreenshotLog.captureAndSave("Step_${step}_${exec.first().type}")
                     }
                 }
+                // v7 M4: deterministic recovery ladder - one rung per stall.
+                if ((timedOut || !delta) && stuckStreak in 1..7) {
+                    recoveryHint = runRecoveryLadder(stuckStreak, step, accessibility, announce)
+                }
+
+                } // exec.isNotEmpty()
             } else {
                 noProgressStreak = if (plan.done) noProgressStreak else 0
             }
@@ -282,14 +350,22 @@ object SQLAgentCoreV5 {
             }
 
             if (noProgressStreak >= NO_PROGRESS_LIMIT) {
-                // BUG #2 (v7): journal stays ACTIVE on failure - the next
-                // attempt resumes from the recorded position, never step 1.
+                // v7 M4: FAILED status is persisted (journal NEVER deleted) -
+                // the next attempt resumes from the recorded position.
+                TaskStateManager.markFailed(
+                    SqlAiApp.instance,
+                    "no progress after $NO_PROGRESS_LIMIT attempts"
+                )
+                ScreenshotLog.captureAndSave("TASK_FAILED")
                 LogBus.log(
                     "Agent stopped: no progress after $NO_PROGRESS_LIMIT attempts " +
-                        "(journal kept for resume)",
+                        "(status=FAILED, journal kept for resume)",
                     LogLevel.WARN
                 )
-                Speaker.post("I could not complete that task. Say it again to resume.")
+                Speaker.post(
+                    "I could not complete that task: no progress after $NO_PROGRESS_LIMIT tries. " +
+                        "Say it again to resume from where it stopped."
+                )
                 break
             }
 
@@ -297,7 +373,21 @@ object SQLAgentCoreV5 {
             val freshScreen = withContext(Dispatchers.IO) {
                 accessibility.captureScreenDetailed(70)
             }
+            // v7 M4: deterministic subgoal auto-mark - a remaining label seen
+            // on the fresh screen is DONE even when the model forgot to emit
+            // "milestone" (never depends on LLM honesty).
+            if (delta || verifyOk) {
+                val remaining = TaskStateManager.snapshot()?.remaining.orEmpty()
+                val auto = CriticAgent.findCompletedSubgoal(remaining, freshScreen)
+                if (auto != null) {
+                    TaskStateManager.markCompleted(SqlAiApp.instance, auto)
+                    LogBus.log("[CRITIC] subgoal auto-marked: $auto", LogLevel.SUCCESS)
+                }
+            }
             val core = when {
+                criticSkipReason != null ->
+                    "$criticSkipReason Current screen:\n$freshScreen"
+
                 timedOut ->
                     "TIMEOUT: your actions produced no valid UI change within the step watchdog. " +
                         "The screen was re-parsed fresh and any blocking dialog was dismissed. " +
@@ -325,8 +415,9 @@ object SQLAgentCoreV5 {
                         "Current screen:\n$freshScreen"
             }
             val stateLine = TaskStateManager.stateBlock()
+            val fullCore = if (recoveryHint.isBlank()) core else "$recoveryHint\n$core"
             conversation.add(
-                ChatMessage("user", if (stateLine.isBlank()) core else "$stateLine\n\n$core")
+                ChatMessage("user", if (stateLine.isBlank()) fullCore else "$stateLine\n\n$fullCore")
             )
             trim(conversation)
             refreshState(task, force = false)
@@ -377,6 +468,82 @@ object SQLAgentCoreV5 {
     }
 
     // ------------------------------------------------------------------ utils
+
+    /**
+     * v7 M4 deterministic recovery ladder - one rung per consecutive stall:
+     * 1 rescan, 2 scroll down x2, 3 scroll up x2, 4 alternate-path hint,
+     * 5 BACK, 6 reopen foreground app, 7 blocker sweep. Every rung is capped
+     * at 15 s, screenshot-logged and returns the hint appended to the model
+     * feedback. No randomness, no guessing - the same stall sequence always
+     * walks the same ladder.
+     */
+    private suspend fun runRecoveryLadder(
+        rung: Int,
+        step: Int,
+        accessibility: SqlAccessibilityService,
+        announce: (String) -> Unit
+    ): String {
+        val label = when (rung) {
+            1 -> "rescan"
+            2 -> "scroll down x2"
+            3 -> "scroll up x2"
+            4 -> "alternate path"
+            5 -> "back"
+            6 -> "reopen app"
+            7 -> "blocker sweep"
+            else -> return ""
+        }
+        LogBus.log("Recovery rung $rung/7: $label", LogLevel.WARN)
+        ScreenshotLog.captureAndSave("Step_${step}_RECOVER_$rung")
+        withTimeoutOrNull(RECOVERY_RUNG_TIMEOUT_MS) {
+            when (rung) {
+                1 -> {
+                    accessibility.invalidateShotCache()
+                    accessibility.captureScreenDetailed(70)
+                }
+
+                2 -> {
+                    accessibility.scroll("down")
+                    delay(350)
+                    accessibility.scroll("down")
+                }
+
+                3 -> {
+                    accessibility.scroll("up")
+                    delay(350)
+                    accessibility.scroll("up")
+                }
+
+                4 -> Unit // pure feedback hint - no device action this rung.
+
+                5 -> {
+                    accessibility.globalBack()
+                    delay(400)
+                    announce("Let me go back and try differently")
+                }
+
+                6 -> reopenForeground(accessibility)
+
+                7 -> BlockerSweeper.recover(accessibility)
+            }
+        }
+        return when (rung) {
+            4 -> "RECOVERY: switch to an ALTERNATE label or pixel tap {x,y} from the screenshot NOW."
+            else -> "RECOVERY DONE by system: $label. Resume from your CURRENT position - do NOT restart."
+        }
+    }
+
+    /** Rung 6: home, then relaunch whatever app was in the foreground. */
+    private suspend fun reopenForeground(accessibility: SqlAccessibilityService) {
+        val pkg = accessibility.frontPackage()
+        accessibility.globalHome()
+        delay(450)
+        if (pkg.isBlank()) return
+        withContext(Dispatchers.IO) {
+            DeviceController.execute(listOf(Action(type = "open_app", app = pkg)))
+        }
+        delay(800)
+    }
 
     private fun refreshState(task: String, force: Boolean) {
         val now = System.currentTimeMillis()
@@ -457,6 +624,10 @@ object SQLAgentCoreV5 {
     }
 
     private fun trim(conversation: MutableList<ChatMessage>) {
-        while (conversation.size > MAX_TURNS) conversation.removeAt(0)
+        // v7 M4 BUG-3: index 0 holds the TASK header - drop the SECOND
+        // oldest turn instead so the pinned goal survives history trimming.
+        while (conversation.size > MAX_TURNS && conversation.size > 1) {
+            conversation.removeAt(1)
+        }
     }
 }

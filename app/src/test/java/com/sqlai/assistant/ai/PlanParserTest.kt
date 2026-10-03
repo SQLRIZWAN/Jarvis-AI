@@ -57,6 +57,24 @@ class PlanParserTest {
     }
 
     @Test
+    fun actionRefFieldParsesForEveryActionType() {
+        val raw = """
+            {"reply":"t","actions":[
+              {"type":"tap","ref":"r3"},
+              {"type":"tap_text","ref":"r7","text":"Send"},
+              {"type":"tap","x":10,"y":20}
+            ]}
+        """.trimIndent()
+
+        val actions = PlanParser.parse(raw).actions
+
+        assertEquals("r3", actions[0].ref)
+        assertEquals("r7", actions[1].ref)
+        assertEquals("Send", actions[1].text)
+        assertNull(actions[2].ref)
+    }
+
+    @Test
     fun replyIsCleanedAndDefaulted() {
         val plan = PlanParser.parse("""{"reply":"  lots   of   space  "}""")
         assertEquals("lots of space", plan.reply)

@@ -75,6 +75,25 @@ object TaskStateManager {
         )
     }
 
+    /**
+     * v7 M4: persist FAILED status + reason. The journal is NEVER deleted on
+     * failure - the next attempt resumes from the recorded position, and the
+     * reason is injected into the state block so the model avoids it.
+     */
+    @Synchronized
+    fun markFailed(context: Context, reason: String) {
+        val journal = currentOrStored(context) ?: return
+        persist(
+            context,
+            journal.copy(
+                status = TaskJournal.STATUS_FAILED,
+                failReason = reason.take(160),
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+        LogBus.log("[TASK] FAILED: $reason (journal kept for resume)", LogLevel.WARN)
+    }
+
     @Synchronized
     fun setPendingCallMessage(context: Context, message: String?) {
         val journal = currentOrStored(context) ?: return
@@ -166,7 +185,8 @@ object TaskJournal {
         val lastAction: String? = null,
         val lastScreenHash: String? = null,
         val subgoals: List<Subgoal> = emptyList(),
-        val pendingCallMessage: String? = null
+        val pendingCallMessage: String? = null,
+        val failReason: String? = null
     ) {
         val completed: List<String>
             get() = subgoals.filter { it.status == GOAL_DONE }.map { it.label }
@@ -176,9 +196,11 @@ object TaskJournal {
     }
 
     /**
-     * Resume the ACTIVE journal (running + fresh) regardless of wording -
-     * rephrased tasks keep their completed milestones. Anything else starts
-     * a brand-new journal with a fresh UUID.
+     * Resume the ACTIVE journal (running OR failed + fresh) regardless of
+     * wording - rephrased tasks keep their completed milestones, and a FAILED
+     * attempt flips back to running with its position intact (v7 M4: never
+     * restart from step 1). Anything else starts a brand-new journal with a
+     * fresh UUID.
      */
     fun resume(
         stored: Journal?,
@@ -187,7 +209,7 @@ object TaskJournal {
         now: Long
     ): Journal {
         val active = stored != null &&
-            stored.status == STATUS_RUNNING &&
+            (stored.status == STATUS_RUNNING || stored.status == STATUS_FAILED) &&
             now - stored.updatedAt < FRESH_MS
         if (!active) {
             return Journal(
@@ -206,6 +228,8 @@ object TaskJournal {
         }
         return stored.copy(
             task = task,
+            status = STATUS_RUNNING,
+            failReason = null,
             updatedAt = now,
             subgoals = merged.values.toList()
         )
@@ -225,14 +249,18 @@ object TaskJournal {
         return journal.copy(updatedAt = now, subgoals = subs)
     }
 
-    /** COMPLETED (never redo) + STILL REMAINING + LAST POSITION. */
+    /** COMPLETED (never redo) + STILL REMAINING + LAST POSITION (+ last failure). */
     fun stateBlock(journal: Journal?): String {
         if (journal == null) return ""
         val done = journal.completed.ifEmpty { listOf("(none)") }.joinToString(", ")
         val left = journal.remaining.ifEmpty { listOf("(none)") }.joinToString(", ")
+        val fail = journal.failReason
+            ?.takeIf { it.isNotBlank() }
+            ?.let { "\nLAST FAILURE: $it (resume from here, do NOT restart)" }
+            .orEmpty()
         return "TASK STATE - COMPLETED (never redo these): $done\n" +
             "STILL REMAINING: $left\n" +
-            "LAST POSITION: package=${journal.lastPackage ?: "?"}, step=${journal.step}"
+            "LAST POSITION: package=${journal.lastPackage ?: "?"}, step=${journal.step}$fail"
     }
 
     /** TASK header + state - appended to the system prompt so trim-proof. */
@@ -267,6 +295,7 @@ object TaskJournal {
             }
         )
         .put("pendingCallMessage", journal.pendingCallMessage ?: JSONObject.NULL)
+        .put("failReason", journal.failReason ?: JSONObject.NULL)
         .toString()
 
     /** Decode persisted JSON - corrupt/blank input degrades gracefully to null. */
@@ -307,7 +336,8 @@ object TaskJournal {
                 lastScreenHash = o.optStringOrNull("lastScreenHash"),
                 subgoals = subs,
                 pendingCallMessage = if (o.isNull("pendingCallMessage")) null
-                    else o.optString("pendingCallMessage")
+                    else o.optString("pendingCallMessage"),
+                failReason = o.optStringOrNull("failReason")
             )
         } catch (t: Throwable) {
             null

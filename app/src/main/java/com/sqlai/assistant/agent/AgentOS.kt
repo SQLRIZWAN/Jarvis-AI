@@ -36,6 +36,23 @@ import kotlinx.coroutines.sync.Mutex
  */
 object AgentOS {
 
+    /**
+     * Accept words for the risky-action voice gate (lowercase, punctuation
+     * stripped). Kept clear of IntentRouter's TASKY/cancel vocabulary so a
+     * plain "haan"/"yes" always lands here as [Intent.Chat] instead of being
+     * queued as a new task or treated as a stop.
+     */
+    private val YES_WORDS = setOf(
+        "haan", "ha", "han", "ha ji", "ji haan", "yes", "yep", "yeah", "sure",
+        "ok", "okay", "confirm", "do it", "go ahead"
+    )
+
+    /** Decline words - same TASKY-avoidance rule as [YES_WORDS]. */
+    private val NO_WORDS = setOf(
+        "nahi", "na", "nahi nahi", "no", "nope", "skip", "rehne do",
+        "don't", "do not"
+    )
+
     /** Everything the outside world can ask the agent cluster to do. */
     sealed class Intent {
         data class Chat(val text: String) : Intent()
@@ -73,6 +90,10 @@ object AgentOS {
     @Volatile
     var pendingTask: String? = null
 
+    /** Pending risky-action confirmation latch (v7 M4 voice gate). */
+    @Volatile
+    private var pendingConfirm: kotlinx.coroutines.CompletableDeferred<Boolean>? = null
+
     init {
         // Mirror the OperatorAgent run-state into the Blackboard and consume
         // the queue the moment the current run finishes.
@@ -104,6 +125,24 @@ object AgentOS {
         scope.launch { runSafely(intent, source) }
     }
 
+    /**
+     * v7 M4 risky-action gate: speak [question] and suspend until the user
+     * says haan/nahi (routed as [Intent.Chat]) or [timeoutMs] elapses.
+     * One latch at a time - a newer question supersedes the older one.
+     * Returns false on timeout / cancellation (never swallows cancel).
+     */
+    suspend fun askConfirm(question: String, timeoutMs: Long = 8_000L): Boolean {
+        val latch = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        pendingConfirm = latch
+        try {
+            Speaker.post(question)
+            LogBus.log("[AgentOS] confirm: $question", LogLevel.WARN)
+            return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) { latch.await() } ?: false
+        } finally {
+            if (pendingConfirm === latch) pendingConfirm = null
+        }
+    }
+
     /** Classify one utterance, then dispatch it (voice/typed entry point). */
     fun dispatchText(text: String, source: String) {
         scope.launch { routeText(text, source) }
@@ -131,6 +170,27 @@ object AgentOS {
     private suspend fun handle(intent: Intent, source: String) {
         when (intent) {
             is Intent.Chat -> {
+                // v7 M4: a pending risky-action confirmation latches FIRST -
+                // plain words like "haan"/"nahi" answer the gate, not the LLM.
+                val confirm = pendingConfirm
+                if (confirm != null && !confirm.isCompleted) {
+                    val text = intent.text.trim().lowercase()
+                        .removeSuffix(".").removeSuffix("!").trim()
+                    when {
+                        YES_WORDS.contains(text) -> {
+                            confirm.complete(true)
+                            Speaker.post("Okay, doing it.")
+                        }
+
+                        NO_WORDS.contains(text) -> {
+                            confirm.complete(false)
+                            Speaker.post("Skipping that step.")
+                        }
+
+                        else -> Speaker.post("Say haan to confirm, nahi to skip.")
+                    }
+                    return
+                }
                 Blackboard.chatBusy = true
                 HistoryStore.addUser(intent.text)
                 try {

@@ -23,6 +23,36 @@ object GeminiModelFetcher {
     private const val PAGE_SIZE = 200
     private const val MAX_PAGES = 4
 
+    /** Model ids that must never be auto-selected (specialized/preview builds). */
+    private val EXCLUDED_TAGS = listOf("image", "thinking", "pro", "lite", "preview")
+
+    /** major.minor[.patch] embedded in a Gemini model id. */
+    private val VERSION_PATTERN = Regex("""(\d+)\.(\d+)(?:\.(\d+))?""")
+
+    /**
+     * Picks the newest general-purpose flash model from a live model list.
+     *
+     * Rules: the id must contain "-flash"; ids tagged image / thinking / pro /
+     * lite / preview are skipped; the highest major.minor(.patch) version wins
+     * and equal versions break alphabetically (earlier id first).
+     * Returns null when no id qualifies.
+     */
+    fun pickBestFlash(models: List<GeminiModel>): String? =
+        models.map { it.id }
+            .filter { id -> id.contains("-flash") }
+            .filterNot { id -> EXCLUDED_TAGS.any { id.contains(it) } }
+            .sortedWith(compareByDescending<String> { versionOf(it) }.thenBy { it })
+            .firstOrNull()
+
+    /** Sortable version key of [id]: major * 1e12 + minor * 1e6 + patch (0 if unversioned). */
+    private fun versionOf(id: String): Long {
+        val match = VERSION_PATTERN.find(id) ?: return 0L
+        val major = match.groupValues[1].toLongOrNull()?.coerceAtMost(999L) ?: 0L
+        val minor = match.groupValues[2].toLongOrNull()?.coerceAtMost(999_999L) ?: 0L
+        val patch = match.groupValues[3].toLongOrNull()?.coerceAtMost(999_999L) ?: 0L
+        return major * 1_000_000_000_000L + minor * 1_000_000L + patch
+    }
+
     private val http = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(40, TimeUnit.SECONDS)

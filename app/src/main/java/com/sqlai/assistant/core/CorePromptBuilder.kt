@@ -24,7 +24,7 @@ object CorePromptBuilder {
           "reply": "<short spoken confirmation, max 15 words>",
           "actions": [
             {"type": "open_app", "app": "whatsapp"},
-            {"type": "tap_text", "text": "Send"},
+            {"type": "tap", "ref": "r3"},
             {"type": "type_text", "text": "hello"},
             {"type": "press_key", "key": "back"}
           ]
@@ -32,7 +32,8 @@ object CorePromptBuilder {
 
         Supported action types:
           open_app {app}                 close_app {app}
-          tap_text {text}                tap {x, y}
+          tap {ref}   <-- ALWAYS PREFERRED: "ref" = r-id from the LIVE SCREEN list
+          tap {x, y}                     tap_text {text}   (fallbacks only)
           swipe {x1,y1,x2,y2,duration_ms} scroll {direction: up|down}
           type_text {text}               press_key {key: back|home|recents|enter}
           set_volume {value 0-15}        volume_up {}     volume_down {}
@@ -60,8 +61,8 @@ object CorePromptBuilder {
         THINK -> ACT -> VERIFY loop until the user's task is fully complete.
 
         Each turn you receive: the original task, your previous thoughts/actions and their
-        verification results, plus the LIVE screen (every visible element with bounds "[x,y WxH]")
-        and optionally a screenshot image.
+        verification results, plus the LIVE screen (every visible element prefixed with a
+        stable ref id "r0", "r1", ... and bounds "[x,y WxH]") and optionally a screenshot image.
 
         Reply with EXACTLY one raw JSON object:
         {
@@ -85,16 +86,23 @@ object CorePromptBuilder {
             TASK STATE "REMAINING" list, copy that label into "milestone" (exact text).
             It is persisted - completed milestones are shown back to you every turn.
 
+        SEMANTIC TAPPING (v7): every LIVE SCREEN line starts with a stable ref id.
+        ALWAYS tap by id: "actions": [{"type":"tap","ref":"r7"}]. The system resolves the
+        ref to the exact on-screen element and clicks it - no coordinates needed. Refs
+        come from the CURRENT turn's screen only (a stale ref fails loudly, not blindly).
+
         VISUAL GROUNDING (v5): when the turn includes a screenshot IMAGE, use it as
-        your eyes: locate the target element in the image and compute its EXACT pixel
-        coordinates on the full screen, then use "tap": {"type":"tap","x":<px>,"y":<py>}.
-        Coordinate taps are MANDATORY for icons / hearts / floating buttons / canvas
-        elements where tap_text would fail. Coordinates are screen pixels (same size as
-        the screenshot).
+        your eyes: locate elements NOT present in the LIVE screen list (icons / hearts /
+        floating buttons / canvas) and compute their EXACT pixel coordinates on the full
+        screen, then use "tap": {"type":"tap","x":<px>,"y":<py>}. Coordinates are screen
+        pixels (same size as the screenshot). Ref tap remains PRIMARY whenever the
+        target is listed in the LIVE screen.
 
         Action types:
           open_app {app} close_app {app}
-          tap_text {text} tap {x, y}   <-- x,y = exact pixel coords from the screenshot
+          tap {ref}  <-- PRIMARY: r-id from the LIVE SCREEN line
+          tap {x, y} <-- vision fallback for elements absent from the dump
+          tap_text {text}  (last-resort label fallback)
           scroll {direction: up|down} type_text {text}
           press_key {key: back|home|recents|enter}
           wait {ms} wait_for {text, ms}  (wait_for pauses until the text appears)
@@ -109,9 +117,10 @@ object CorePromptBuilder {
           - TASK STATE: the turn may include "COMPLETED (never redo these)" and
             "STILL REMAINING". NEVER restart the task from the beginning and NEVER redo
             a completed milestone - always resume from the FIRST remaining item.
-          - Use tap_text when the exact label is on screen; otherwise GROUND your tap in
-            the screenshot with pixel coordinates. Never guess blind coordinates without
-            having seen the image this turn.
+          - Tap by ref FIRST: {"type":"tap","ref":"rN"} whenever the target line exists in
+            the LIVE screen. Use tap_text only for exact labels the ref list lacks, and
+            pixel coordinates ONLY for canvas/icon elements the dump never lists - never
+            guess blind coordinates.
           - ELEMENT MATCHING priority: contentDescription exact > view-id > exact text >
             contains > fuzzy. The system REJECTS taps below confidence 80 (fuzzy below 85
             never taps) - when a tap_text fails, do NOT force it: SCROLL, WAIT 1s, RE-SCAN.

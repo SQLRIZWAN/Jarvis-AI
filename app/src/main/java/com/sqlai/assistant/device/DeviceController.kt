@@ -55,7 +55,8 @@ object DeviceController {
     private fun describe(action: Action): String = when (action.type) {
         "open_app", "close_app" -> "${action.type} ${action.app}"
         "tap_text", "type_text" -> "${action.type} \"${action.text}\""
-        "tap" -> "tap (${action.x},${action.y})"
+        "tap" -> if (action.ref != null) "tap ref=${action.ref}"
+        else "tap (${action.x},${action.y})"
         "swipe" -> "swipe (${action.x1()}-${action.x2()})"
         "set_volume" -> "volume=${action.value}"
         "set_brightness" -> "brightness=${action.value}"
@@ -259,9 +260,15 @@ object DeviceController {
             }
 
             "tap" -> {
+                val ref = action.ref
                 val x = action.x
                 val y = action.y
-                if (x != null && y != null) {
+                if (ref != null) {
+                    // v7 M4: semantic tap - resolve the stable r-id against the
+                    // CURRENT tree; stale/unknown refs fail loudly (BUG #8).
+                    val ok = accessibility?.clickRef(ref) == true
+                    if (!ok) LogBus.log("REF_MISS ref=$ref (stale or off-screen)", LogLevel.WARN)
+                } else if (x != null && y != null) {
                     // Visual-grounding path: exact pixel dispatch, clamped to
                     // the real display so vision coords can never miss screen.
                     CoordinateGestureExecutor.tap(x, y)
