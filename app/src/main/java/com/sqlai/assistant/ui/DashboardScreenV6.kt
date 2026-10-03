@@ -61,6 +61,8 @@ import androidx.compose.ui.unit.sp
 import com.sqlai.assistant.BuildConfig
 import com.sqlai.assistant.R
 import com.sqlai.assistant.SqlAiApp
+import com.sqlai.assistant.agent.GuardAgent
+import com.sqlai.assistant.agent.SelfTestSuite
 import com.sqlai.assistant.ai.GeminiLiveAudioEngine
 import com.sqlai.assistant.core.AppCrashHandler
 import com.sqlai.assistant.core.AssistantState
@@ -123,6 +125,7 @@ fun DashboardScreenV6() {
     }
 
     var manualCommand by remember { mutableStateOf("") }
+    var selfTestTick by remember { mutableStateOf(0) }
     val logListState = rememberLazyListState()
     val scope = AppCrashHandler.safeScope(rememberCoroutineScope())
 
@@ -268,6 +271,45 @@ fun DashboardScreenV6() {
                     } else "Idle",
                     modifier = Modifier.weight(1f)
                 )
+            }
+        }
+
+        // ------------------------------------------- self test (v7 M7)
+        SectionCard(title = "Self test (v7 M7)") {
+            val report = remember(selfTestTick) { SelfTestSuite.run() }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                MetricCard(
+                    label = "Checks",
+                    value = "${report.passed}/${report.total}",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricCard(
+                    label = "Status",
+                    value = if (report.allPass) "PASS" else "FAIL ${report.failed.size}",
+                    modifier = Modifier.weight(1f)
+                )
+                MetricCard(
+                    label = "Injections blocked",
+                    value = "${GuardAgent.blockedCount.get()}",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            if (!report.allPass) {
+                Spacer(Modifier.height(8.dp))
+                report.failed.forEach { c ->
+                    Text(
+                        "FAIL ${c.name}: ${c.detail}",
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = { selfTestTick++ }) {
+                Text("Re-run checks")
             }
         }
 

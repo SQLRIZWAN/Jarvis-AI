@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.agent.AgentOS
 import com.sqlai.assistant.agent.CriticAgent
+import com.sqlai.assistant.agent.GuardAgent
 import com.sqlai.assistant.ai.Action
 import com.sqlai.assistant.ai.AgentParser
 import com.sqlai.assistant.ai.AiClient
@@ -166,8 +167,14 @@ object SQLAgentCoreV5 {
             step++
 
             // ---- OBSERVE --------------------------------------------------
-            val screen = withContext(Dispatchers.IO) {
+            val rawScreen = withContext(Dispatchers.IO) {
                 accessibility.captureScreenDetailed(70)
+            }
+            // v7 M7: screen text is attacker-controlled (a page can render
+            // instructions) - strip injection lines BEFORE they reach the LLM.
+            val screen = GuardAgent.sanitizeScreen(rawScreen)
+            if (screen != rawScreen) {
+                LogBus.log("[GUARD] suspicious line removed from screen observation", LogLevel.WARN)
             }
             val softStuck = stuckStreak > 0
             // BUG #4: vision grounding ALWAYS ON - every think() carries a
@@ -392,8 +399,12 @@ object SQLAgentCoreV5 {
             }
 
             // ---- FEEDBACK for the next think ------------------------------
-            val freshScreen = withContext(Dispatchers.IO) {
+            val rawFresh = withContext(Dispatchers.IO) {
                 accessibility.captureScreenDetailed(70)
+            }
+            val freshScreen = GuardAgent.sanitizeScreen(rawFresh)
+            if (freshScreen != rawFresh) {
+                LogBus.log("[GUARD] suspicious line removed from feedback screen", LogLevel.WARN)
             }
             // v7 M4: deterministic subgoal auto-mark - a remaining label seen
             // on the fresh screen is DONE even when the model forgot to emit

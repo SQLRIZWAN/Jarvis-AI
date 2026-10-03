@@ -4,6 +4,8 @@ import com.sqlai.assistant.SqlAiApp
 import com.sqlai.assistant.ai.AiClient
 import com.sqlai.assistant.ai.ChatMessage
 import com.sqlai.assistant.core.CorePromptBuilder
+import com.sqlai.assistant.core.LogBus
+import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.engine.HistoryStore
 import kotlinx.coroutines.flow.first
 
@@ -21,11 +23,18 @@ object ConversationAgent {
 
     /** Answer one conversational message. Blank only when the model failed. */
     suspend fun respond(text: String): String {
+        // v7 M7: user text can carry a prompt-injection payload (pasted from
+        // a page) - never let it reach the model as instruction.
+        val guarded = GuardAgent.guard(text)
+        if (guarded.blocked) {
+            LogBus.log("[GUARD] blocked injected user message (${guarded.matched})", LogLevel.WARN)
+            return "I can't follow instructions like that. Ask me something normally."
+        }
         val settings = SqlAiApp.settings.settings.first()
         if (settings.apiKey.isBlank()) return "Yes?"
         val history = (
             HistoryStore.snapshot().map { ChatMessage(it.first, it.second) } +
-                ChatMessage("user", text)
+                ChatMessage("user", guarded.output)
             ).takeLast(MAX_HISTORY)
         return AiClient.complete(
             settings = settings,
