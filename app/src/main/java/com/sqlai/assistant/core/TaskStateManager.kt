@@ -33,7 +33,9 @@ object TaskStateManager {
         val task: String,
         val subgoals: List<String>,
         val completed: List<String>,
-        val pendingCallMessage: String?
+        val pendingCallMessage: String?,
+        /** v7 M5: last persisted failure reason (null = never failed). */
+        val failReason: String? = null
     ) {
         val remaining: List<String>
             get() = subgoals.filter { it !in completed }
@@ -72,6 +74,28 @@ object TaskStateManager {
         LogBus.log(
             "[TASK] milestone done: $milestone (${next.completed.size}/${next.subgoals.size})",
             LogLevel.SUCCESS
+        )
+    }
+
+    /**
+     * v7 M5: persist the live position every loop step (cheap SharedPreferences
+     * `apply()`). No-op when no journal exists yet.
+     */
+    @Synchronized
+    fun savePosition(
+        context: Context,
+        step: Int,
+        lastPackage: String?,
+        lastAction: String?,
+        lastScreenHash: String?
+    ) {
+        val journal = currentOrStored(context) ?: return
+        persist(
+            context,
+            TaskJournal.withPosition(
+                journal, step, lastPackage, lastAction, lastScreenHash,
+                System.currentTimeMillis()
+            )
         )
     }
 
@@ -143,7 +167,8 @@ object TaskStateManager {
         task = j.task,
         subgoals = j.subgoals.map { it.label },
         completed = j.completed,
-        pendingCallMessage = j.pendingCallMessage
+        pendingCallMessage = j.pendingCallMessage,
+        failReason = j.failReason
     )
 }
 
@@ -229,11 +254,30 @@ object TaskJournal {
         return stored.copy(
             task = task,
             status = STATUS_RUNNING,
-            failReason = null,
             updatedAt = now,
             subgoals = merged.values.toList()
         )
     }
+
+    /**
+     * v7 M5: persist the live run position (step / package / action / screen
+     * hash) so [stateBlock]'s LAST POSITION is real - a crash, stop or retry
+     * resumes from HERE instead of step 1. Blank values keep the old ones.
+     */
+    fun withPosition(
+        journal: Journal,
+        step: Int,
+        lastPackage: String?,
+        lastAction: String?,
+        lastScreenHash: String?,
+        now: Long
+    ): Journal = journal.copy(
+        step = step,
+        lastPackage = lastPackage?.takeIf { it.isNotBlank() } ?: journal.lastPackage,
+        lastAction = lastAction?.takeIf { it.isNotBlank() }?.take(120) ?: journal.lastAction,
+        lastScreenHash = lastScreenHash ?: journal.lastScreenHash,
+        updatedAt = now
+    )
 
     /** Mark a milestone done (adds it as a done sub-goal when new). */
     fun withMilestone(journal: Journal, milestone: String, now: Long): Journal {

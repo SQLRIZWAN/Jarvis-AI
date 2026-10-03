@@ -67,9 +67,39 @@ class TaskJournalResumeTest {
 
         assertEquals(first.taskId, retry.taskId)
         assertEquals(TaskJournal.STATUS_RUNNING, retry.status)
-        assertNull(retry.failReason)
+        // The reason STAYS so stateBlock keeps showing LAST FAILURE this run.
+        assertEquals("no progress after 20 attempts", retry.failReason)
         assertEquals(listOf("a"), retry.completed)
         assertEquals(listOf("b"), retry.remaining)
+    }
+
+    @Test
+    fun withPositionUpdatesLivePositionWithoutTouchingProgress() {
+        val journal = TaskJournal.resume(null, "open settings", listOf("a", "b"), t0)
+            .let { TaskJournal.withMilestone(it, "a", t0 + 100) }
+
+        val moved = TaskJournal.withPosition(
+            journal, step = 7, lastPackage = "com.android.settings",
+            lastAction = "tap", lastScreenHash = "hash7", now = t0 + 200
+        )
+
+        assertEquals(7, moved.step)
+        assertEquals("com.android.settings", moved.lastPackage)
+        assertEquals("tap", moved.lastAction)
+        assertEquals("hash7", moved.lastScreenHash)
+        assertEquals(journal.taskId, moved.taskId)
+        assertEquals(listOf("a"), moved.completed)
+        assertEquals(TaskJournal.STATUS_RUNNING, moved.status)
+
+        // Blank values keep the previous position instead of wiping it.
+        val unchanged = TaskJournal.withPosition(
+            moved, step = 8, lastPackage = " ", lastAction = null,
+            lastScreenHash = null, now = t0 + 300
+        )
+        assertEquals(8, unchanged.step)
+        assertEquals("com.android.settings", unchanged.lastPackage)
+        assertEquals("tap", unchanged.lastAction)
+        assertEquals("hash7", unchanged.lastScreenHash)
     }
 
     @Test
@@ -192,5 +222,16 @@ class TaskJournalResumeTest {
         assertTrue(pin.contains("STILL REMAINING"))
         assertEquals("", TaskJournal.pinnedBlock(null))
         assertEquals("", TaskJournal.stateBlock(null))
+    }
+
+    @Test
+    fun stateBlockShowsLastFailureWhenPresent() {
+        val failed = TaskJournal.resume(null, "t", listOf("a"), t0)
+            .copy(status = TaskJournal.STATUS_FAILED, failReason = "stuck on pin dialog")
+
+        val block = TaskJournal.stateBlock(failed)
+
+        assertTrue(block.contains("LAST FAILURE: stuck on pin dialog"))
+        assertTrue(block.contains("do NOT restart"))
     }
 }

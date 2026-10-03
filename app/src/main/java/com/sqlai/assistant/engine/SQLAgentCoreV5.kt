@@ -123,12 +123,24 @@ object SQLAgentCoreV5 {
             LogBus.log("Goal split into ${subgoals.size} micro-goals", LogLevel.SUCCESS)
             conversation.add(ChatMessage("user", "MICRO-GOAL PLAN (follow in order):\n$numbered"))
         }
-        if (taskState.completed.isNotEmpty()) {
-            conversation.add(ChatMessage("user", TaskStateManager.stateBlock()))
+        if (taskState.completed.isNotEmpty() || taskState.failReason != null) {
+            // v7 M5: explicit RESUMING header - the model is told in words
+            // (not just state JSON) that earlier progress exists and the
+            // recorded failure reason is shown so it takes another path.
+            val state = TaskStateManager.stateBlock()
+            conversation.add(
+                ChatMessage(
+                    "user",
+                    "RESUMING: this task was already in progress - continue from the " +
+                        "recorded position, do NOT start over.\n$state"
+                )
+            )
             LogBus.log(
-                "[TASK] resuming: ${taskState.completed.size} milestone(s) already done",
+                "[TASK] resuming: ${taskState.completed.size} milestone(s) already done" +
+                    if (taskState.failReason != null) ", last failure: ${taskState.failReason}" else "",
                 LogLevel.WARN
             )
+            announce("Resuming the task from where it stopped")
         } else {
             subgoals.firstOrNull()?.let { announce(it) }
         }
@@ -348,6 +360,16 @@ object SQLAgentCoreV5 {
                 }
                 LogBus.log("Model said done but verification failed - continuing", LogLevel.WARN)
             }
+
+            // v7 M5: persist the live position every step - a crash, stop or
+            // retry resumes from HERE (stateBlock LAST POSITION is real now).
+            TaskStateManager.savePosition(
+                SqlAiApp.instance,
+                step,
+                withContext(Dispatchers.IO) { accessibility.frontPackage() },
+                actions.firstOrNull()?.type,
+                CriticAgent.screenHash(screen)
+            )
 
             if (noProgressStreak >= NO_PROGRESS_LIMIT) {
                 // v7 M4: FAILED status is persisted (journal NEVER deleted) -
