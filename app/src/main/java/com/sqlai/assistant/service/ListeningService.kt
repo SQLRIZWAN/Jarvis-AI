@@ -67,6 +67,7 @@ class ListeningService : Service() {
         const val EXTRA_SEND = "send"
 
         private const val NOTIFICATION_ID = 7010
+        private const val BURST_TIMEOUT_MS = 15_000L
 
         fun start(context: Context) {
             val intent = Intent(context, ListeningService::class.java).setAction(ACTION_START)
@@ -145,6 +146,9 @@ class ListeningService : Service() {
     @Volatile private var lastVoskTranscript = ""
     /** v7.0.0.2: PTT/assist window - bypass the speech-pause until it lapses. */
     @Volatile private var forceRecordUntil = 0L
+    /** v7.0.3: false = on-demand mic (burst only), true = 24/7 wake loop. */
+    @Volatile private var bgListen = true
+    @Volatile private var awaitingSince = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -169,6 +173,8 @@ class ListeningService : Service() {
             ACTION_COMMAND -> {
                 val text = intent.getStringExtra(EXTRA_TEXT).orEmpty()
                 promoteToForeground()
+                observeSettings()
+                observeOverlay()
                 if (text.isNotBlank()) {
                     StateBus.setCommand(text)
                     LogBus.log("Assist command: \"$text\"")
@@ -177,13 +183,22 @@ class ListeningService : Service() {
                     AgentOS.dispatchText(text, "assist")
                     scheduleNext(900)
                 }
+                mainHandler.postDelayed({
+                    if (!running && !awaitingCommand) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                    }
+                }, 1_200L)
                 return START_NOT_STICKY
             }
 
             ACTION_TRIGGER -> {
                 promoteToForeground()
+                observeSettings()
+                observeOverlay()
                 ensureRunning()
                 awaitingCommand = true
+                awaitingSince = System.currentTimeMillis()
                 // v7.0.0.2: user invoked the mic (assist / hold-to-talk) -
                 // cut assistant audio so the burst never records itself.
                 Speaker.interruptPlayback()
@@ -219,6 +234,7 @@ class ListeningService : Service() {
                     cancelRecognition()
                     StateBus.setState(if (running) AssistantState.LISTENING else AssistantState.DISABLED)
                     LogBus.log("PTT cancelled", LogLevel.INFO)
+                    maybeStopOnDemand()
                 }
                 return START_NOT_STICKY
             }
@@ -398,10 +414,11 @@ class ListeningService : Service() {
                     if (running && newMode == "vosk") startVoskPipeline()
                 }
                 val shouldRun = settings.assistantEnabled && settings.listenServiceEnabled
+                bgListen = shouldRun
                 if (shouldRun && !running) {
                     ensureRunning()
-                } else if (!shouldRun && running) {
-                    LogBus.log("Listening paused (disabled in settings)", LogLevel.WARN)
+                } else if (!shouldRun && running && !sessionActive()) {
+                    LogBus.log("Background mic off (on-demand mode)", LogLevel.WARN)
                     stopEverything()
                 }
             }
@@ -443,6 +460,19 @@ class ListeningService : Service() {
         StateBus.setState(AssistantState.DISABLED)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    private fun sessionActive(): Boolean =
+        awaitingCommand ||
+            System.currentTimeMillis() < forceRecordUntil ||
+            StateBus.state.value == AssistantState.PROCESSING
+
+    private fun maybeStopOnDemand() {
+        if (bgListen) return
+        mainHandler.postDelayed(
+            { if (running && !bgListen && !awaitingCommand) stopEverything() },
+            700L
+        )
     }
 
     private fun resumeIdle() {
@@ -661,6 +691,19 @@ class ListeningService : Service() {
      */
     private fun armWakeLoop() {
         if (!running) return
+        if (!bgListen) {
+            val burstTimedOut = awaitingCommand &&
+                System.currentTimeMillis() - awaitingSince > BURST_TIMEOUT_MS
+            if (!awaitingCommand || burstTimedOut) {
+                if (burstTimedOut) {
+                    LogBus.log("On-demand burst timed out - releasing mic", LogLevel.WARN)
+                }
+                LogBus.log("On-demand mic: burst over - background loop stays off", LogLevel.INFO)
+                awaitingCommand = false
+                stopEverything()
+                return
+            }
+        }
         if (wakeMode == "vosk" && !voskFailed) {
             startVoskPipeline() // no-op when an engine already exists
             if (voskActive) return
@@ -709,6 +752,7 @@ class ListeningService : Service() {
         lastVoskTranscript = transcript
         LogBus.log("Vosk wake word detected - capturing command", LogLevel.SUCCESS)
         awaitingCommand = true
+        awaitingSince = System.currentTimeMillis()
         awaitingAttempts = 0
         StateBus.setState(AssistantState.LISTENING)
         promoteToForeground()
@@ -799,6 +843,11 @@ class ListeningService : Service() {
                         )
                     }
                     StateBus.setState(AssistantState.ERROR)
+                    if (!bgListen) {
+                        awaitingCommand = false
+                        stopEverything()
+                        return
+                    }
                     scheduleNext(30_000)
                     consecutiveErrors = 0
                     return
@@ -894,6 +943,7 @@ class ListeningService : Service() {
 
             isFinal -> {
                 awaitingCommand = true
+                awaitingSince = System.currentTimeMillis()
                 awaitingAttempts = 0
                 StateBus.setState(AssistantState.LISTENING)
                 LogBus.log("Wake word \"$wakeWord\" detected - listening for command", LogLevel.SUCCESS)

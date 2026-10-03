@@ -342,10 +342,12 @@ fun SettingsScreen(
 
             ToggleRow(
                 title = "24/7 listening service",
-                subtitle = "Keep the microphone service alive in background",
+                subtitle = "Off by default - mic stays off until you hold the mic button " +
+                    "or turn this on",
                 checked = settings?.listenServiceEnabled == true,
                 onCheckedChange = { v ->
                     scope.launch {
+                        SqlAiApp.settings.setAssistantEnabled(v)
                         SqlAiApp.settings.setListenServiceEnabled(v)
                         if (v) ListeningService.start(context) else ListeningService.stop(context)
                     }
@@ -358,9 +360,13 @@ fun SettingsScreen(
             ConfigRow("Provider", settings?.provider?.label ?: "-")
             ConfigRow("Chat model", settings?.model?.ifBlank { "-" } ?: "-")
             ConfigRow(
-                "API key",
-                settings?.apiKey?.takeIf { it.isNotBlank() }
-                    ?.let { "set (\u2026${it.takeLast(4)})" } ?: "not set"
+                "API keys",
+                settings?.let { s ->
+                    val n = com.sqlai.assistant.core.AiProvider.entries.count {
+                        s.keyFor(it).isNotBlank()
+                    }
+                    if (n == 0) "not set" else "$n set"
+                } ?: "-"
             )
             Spacer(Modifier.height(8.dp))
             OutlinedButton(

@@ -1,5 +1,9 @@
 package com.sqlai.assistant.ui
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -36,8 +40,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -59,6 +65,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ApiConfigScreen() {
+    val context = LocalContext.current
     val scope = AppCrashHandler.safeScope(rememberCoroutineScope())
     val settings by SqlAiApp.settings.settings.collectAsState(initial = null)
 
@@ -67,6 +74,8 @@ fun ApiConfigScreen() {
     var baseUrl by remember { mutableStateOf("") }
     var loaded by remember { mutableStateOf(false) }
     var showKey by remember { mutableStateOf(false) }
+    var showAllKeys by remember { mutableStateOf(false) }
+    val keyDrafts = remember { mutableStateMapOf<String, String>() }
     var providerMenuOpen by remember { mutableStateOf(false) }
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
@@ -112,10 +121,13 @@ fun ApiConfigScreen() {
     LaunchedEffect(settings) {
         val s = settings ?: return@LaunchedEffect
         if (!loaded) {
-            apiKey = s.apiKey
+            apiKey = s.keyFor(s.provider)
             model = s.model
             baseUrl = s.baseUrlOverride
             loaded = true
+        }
+        AiProvider.entries.forEach { p ->
+            if (p.name !in keyDrafts) keyDrafts[p.name] = s.keyFor(p)
         }
     }
 
@@ -129,7 +141,7 @@ fun ApiConfigScreen() {
         Spacer(Modifier.height(4.dp))
         Text("API Provider", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         Text(
-            "All providers below have a free tier - paste your key and go",
+            "Set keys for every provider in one place - the failover pool uses them automatically",
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.outline
         )
@@ -161,6 +173,7 @@ fun ApiConfigScreen() {
                             text = { Text(provider.label) },
                             onClick = {
                                 providerMenuOpen = false
+                                apiKey = keyDrafts[provider.name] ?: ""
                                 scope.launch {
                                     SqlAiApp.settings.setProvider(provider)
                                     SqlAiApp.settings.setModel(provider.defaultModel)
@@ -178,7 +191,11 @@ fun ApiConfigScreen() {
                 value = apiKey,
                 onValueChange = {
                     apiKey = it
-                    scope.launch { SqlAiApp.settings.setApiKey(it) }
+                    keyDrafts[currentProviderValue.name] = it
+                    scope.launch {
+                        SqlAiApp.settings.setApiKey(it)
+                        SqlAiApp.settings.setProviderKey(currentProviderValue, it)
+                    }
                 },
                 label = { Text("API Key") },
                 placeholder = { Text(settings?.provider?.keyHint ?: "gsk_...") },
@@ -365,7 +382,9 @@ fun ApiConfigScreen() {
                 OutlinedButton(onClick = {
                     scope.launch {
                         SqlAiApp.settings.setApiKey("")
+                        SqlAiApp.settings.setProviderKey(currentProviderValue, "")
                         apiKey = ""
+                        keyDrafts[currentProviderValue.name] = ""
                         testResult = null
                     }
                 }) {
@@ -390,26 +409,93 @@ fun ApiConfigScreen() {
             }
         }
 
-        SectionCard(title = "Free key links") {
-            ProviderLink("Groq", "console.groq.com/keys")
-            ProviderLink("Gemini", "aistudio.google.com/apikey")
-            ProviderLink("OpenRouter", "openrouter.ai/keys")
-            ProviderLink("Together", "api.together.ai/settings/api-keys")
-            ProviderLink("Hugging Face", "huggingface.co/settings/tokens")
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Filled.Info,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.width(16.dp)
-                )
-                Spacer(Modifier.width(6.dp))
+        SectionCard(title = "All API keys (set together)") {
+            Text(
+                "Paste keys for any providers you have - failover pool uses them in order. " +
+                    "Tap a link to open the free key page in your browser.",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.width(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "Keys stay on this device only (DataStore).",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                }
                 Text(
-                    "Keys are stored only on this device (DataStore).",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.outline
+                    if (showAllKeys) "Hide keys" else "Show keys",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable { showAllKeys = !showAllKeys }
                 )
+            }
+            Spacer(Modifier.height(8.dp))
+            AiProvider.entries.forEach { p ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        p.label,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        providerUrlCaption(p),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable {
+                            openProviderUrl(context, providerUrl(p))
+                        }
+                    )
+                }
+                OutlinedTextField(
+                    value = keyDrafts[p.name] ?: "",
+                    onValueChange = { v ->
+                        keyDrafts[p.name] = v
+                        scope.launch {
+                            SqlAiApp.settings.setProviderKey(p, v)
+                            if (p == currentProviderValue) {
+                                SqlAiApp.settings.setApiKey(v)
+                                apiKey = v
+                            }
+                        }
+                    },
+                    placeholder = { Text(p.keyHint) },
+                    singleLine = true,
+                    visualTransformation = if (showAllKeys) VisualTransformation.None
+                    else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showAllKeys = !showAllKeys }) {
+                            Icon(
+                                imageVector = if (showAllKeys) {
+                                    Icons.Filled.VisibilityOff
+                                } else {
+                                    Icons.Filled.Visibility
+                                },
+                                contentDescription = "Toggle key visibility"
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(10.dp))
             }
         }
 
@@ -417,14 +503,30 @@ fun ApiConfigScreen() {
     }
 }
 
-@Composable
-private fun ProviderLink(name: String, url: String) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 2.dp)
-    ) {
-        Text(name, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.width(110.dp))
-        Text(url, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+private fun providerUrlCaption(p: AiProvider): String = when (p) {
+    AiProvider.GROQ -> "console.groq.com/keys"
+    AiProvider.GEMINI -> "aistudio.google.com/apikey"
+    AiProvider.OPENROUTER -> "openrouter.ai/keys"
+    AiProvider.TOGETHER -> "api.together.ai/keys"
+    AiProvider.HUGGINGFACE -> "huggingface.co/tokens"
+    AiProvider.DEEPSEEK -> "platform.deepseek.com/api_keys"
+    AiProvider.OLLAMA -> "ollama.com (local, no key)"
+}
+
+private fun providerUrl(p: AiProvider): String = when (p) {
+    AiProvider.GROQ -> "https://console.groq.com/keys"
+    AiProvider.GEMINI -> "https://aistudio.google.com/apikey"
+    AiProvider.OPENROUTER -> "https://openrouter.ai/keys"
+    AiProvider.TOGETHER -> "https://api.together.ai/settings/api-keys"
+    AiProvider.HUGGINGFACE -> "https://huggingface.co/settings/tokens"
+    AiProvider.DEEPSEEK -> "https://platform.deepseek.com/api_keys"
+    AiProvider.OLLAMA -> "https://ollama.com"
+}
+
+private fun openProviderUrl(context: Context, url: String) {
+    try {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    } catch (e: Exception) {
+        LogBus.log("Could not open $url: ${e.message}", LogLevel.WARN)
     }
 }

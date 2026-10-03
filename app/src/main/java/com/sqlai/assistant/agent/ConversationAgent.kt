@@ -31,17 +31,24 @@ object ConversationAgent {
             return "I can't follow instructions like that. Ask me something normally."
         }
         val settings = SqlAiApp.settings.settings.first()
-        if (settings.apiKey.isBlank()) return "Yes?"
         val history = (
             HistoryStore.snapshot().map { ChatMessage(it.first, it.second) } +
                 ChatMessage("user", guarded.output)
             ).takeLast(MAX_HISTORY)
-        return AiClient.complete(
-            settings = settings,
-            screenContext = null,
-            history = history,
-            imageJpeg = null,
-            systemPromptOverride = CorePromptBuilder.voice(settings)
-        ).take(600)
+        return try {
+            AiClient.complete(
+                settings = settings,
+                screenContext = null,
+                history = history,
+                imageJpeg = null,
+                systemPromptOverride = CorePromptBuilder.voice(settings)
+            ).take(600)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            LogBus.log("Chat AI failed: ${e.message}", LogLevel.ERROR)
+            "I could not reach the AI service right now. Check the internet, " +
+                "or add an API key in Settings for a stable connection."
+        }
     }
 }

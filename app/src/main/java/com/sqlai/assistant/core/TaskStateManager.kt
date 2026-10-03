@@ -35,7 +35,12 @@ object TaskStateManager {
         val completed: List<String>,
         val pendingCallMessage: String?,
         /** v7 M5: last persisted failure reason (null = never failed). */
-        val failReason: String? = null
+        val failReason: String? = null,
+        /** v7.0.3: live journal status + position for the progress card. */
+        val status: String = TaskJournal.STATUS_RUNNING,
+        val step: Int = 0,
+        val lastPackage: String? = null,
+        val lastAction: String? = null
     ) {
         val remaining: List<String>
             get() = subgoals.filter { it !in completed }
@@ -168,7 +173,11 @@ object TaskStateManager {
         subgoals = j.subgoals.map { it.label },
         completed = j.completed,
         pendingCallMessage = j.pendingCallMessage,
-        failReason = j.failReason
+        failReason = j.failReason,
+        status = j.status,
+        step = j.step,
+        lastPackage = j.lastPackage,
+        lastAction = j.lastAction
     )
 }
 

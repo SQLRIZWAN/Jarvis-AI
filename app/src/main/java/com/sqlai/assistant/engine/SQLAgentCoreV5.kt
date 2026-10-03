@@ -370,12 +370,20 @@ object SQLAgentCoreV5 {
 
             // v7 M5: persist the live position every step - a crash, stop or
             // retry resumes from HERE (stateBlock LAST POSITION is real now).
+            val lastPackage = withContext(Dispatchers.IO) { accessibility.frontPackage() }
             TaskStateManager.savePosition(
                 SqlAiApp.instance,
                 step,
-                withContext(Dispatchers.IO) { accessibility.frontPackage() },
+                lastPackage,
                 actions.firstOrNull()?.type,
                 CriticAgent.screenHash(screen)
+            )
+            val progress = TaskStateManager.snapshot()
+            LogBus.log(
+                "[STEP] #$step at ${lastPackage ?: "?"} " +
+                    "(${actions.firstOrNull()?.type ?: "no action"}, " +
+                    "${progress?.completed?.size ?: 0}/${progress?.subgoals?.size ?: 0} milestones)",
+                LogLevel.INFO
             )
 
             if (noProgressStreak >= NO_PROGRESS_LIMIT) {
@@ -478,7 +486,6 @@ object SQLAgentCoreV5 {
         settings: com.sqlai.assistant.core.AppSettings,
         task: String
     ): List<String> {
-        if (!settings.apiKey.isNotBlank()) return emptyList()
         return try {
             val raw = withTimeoutOrNull(DECOMPOSE_TIMEOUT_MS) {
                 AiClient.complete(

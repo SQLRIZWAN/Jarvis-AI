@@ -34,6 +34,10 @@ object AiClient {
 
     private const val MAX_HISTORY = 14
 
+    /** v7.0.3: keyless public endpoint - zero-key installs still get a brain. */
+    private const val KEYLESS_URL = "https://text.pollinations.ai/openai"
+    private const val KEYLESS_MODEL = "openai"
+
     /** Longest a call may wait for a rate-limit token before skipping a provider. */
     private const val BUCKET_WAIT_MS = 10_000L
 
@@ -64,8 +68,13 @@ object AiClient {
         systemPromptOverride: String? = null,
         requireJson: Boolean = false
     ): String = withContext(Dispatchers.IO) {
-        if (settings.apiKey.isBlank() && settings.provider != AiProvider.OLLAMA) {
-            throw AiException("No API key set. Open the API tab and paste your ${settings.provider.label} key.")
+        val hasUsableKey = AiProvider.entries.any {
+            it != AiProvider.OLLAMA && settings.keyFor(it).isNotBlank()
+        }
+        if (!hasUsableKey && settings.provider != AiProvider.OLLAMA) {
+            return@withContext keylessComplete(
+                settings, screenContext, history, systemPromptOverride, requireJson
+            )
         }
 
         val text = try {
@@ -73,6 +82,11 @@ object AiClient {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (!hasUsableKey) {
+                return@withContext keylessComplete(
+                    settings, screenContext, history, systemPromptOverride, requireJson
+                )
+            }
             // Model without image support - retry once with text only.
             if (imageJpeg == null) throw e
             failover(settings, screenContext, history, null, systemPromptOverride)
@@ -173,7 +187,7 @@ object AiClient {
      */
     private fun routeFor(settings: AppSettings, provider: AiProvider): ProviderRoute =
         if (provider == settings.provider) {
-            ProviderRoute(provider, settings.apiKey, settings.effectiveBaseUrl(), settings.effectiveModel())
+            ProviderRoute(provider, settings.keyFor(provider), settings.effectiveBaseUrl(), settings.effectiveModel())
         } else {
             ProviderRoute(provider, settings.keyFor(provider), provider.baseUrl, provider.defaultModel)
         }
@@ -191,6 +205,68 @@ object AiClient {
     /** Quick round-trip used by the "Test API" button. */
     suspend fun test(settings: AppSettings): String =
         complete(settings, null, listOf(ChatMessage("user", "Reply with exactly: OK")))
+
+    private suspend fun keylessComplete(
+        settings: AppSettings,
+        screenContext: String?,
+        history: List<ChatMessage>,
+        systemPromptOverride: String?,
+        requireJson: Boolean
+    ): String {
+        val reply = try {
+            pollinationsRequest(settings, screenContext, history, systemPromptOverride)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw AiException(
+                "No API key set and the free fallback is unreachable " +
+                    "(${e.message}). Add a key in the API tab for a stable connection."
+            )
+        }
+        LogBus.log("Zero-key mode: answered via the free public model", LogLevel.SUCCESS)
+        if (!requireJson || isValidJsonPlan(reply)) return reply
+        val repaired = try {
+            pollinationsRequest(
+                settings, screenContext,
+                history + ChatMessage("user", PARSE_REPAIR_PROMPT),
+                systemPromptOverride
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw AiException("PARSE_ERROR")
+        }
+        return if (isValidJsonPlan(repaired)) repaired else throw AiException("PARSE_ERROR")
+    }
+
+    private suspend fun pollinationsRequest(
+        settings: AppSettings,
+        screenContext: String?,
+        history: List<ChatMessage>,
+        systemPromptOverride: String?
+    ): String = withContext(Dispatchers.IO) {
+        val messages = JSONArray()
+        messages.put(
+            JSONObject().put("role", "system")
+                .put("content", systemContent(settings, screenContext, systemPromptOverride))
+        )
+        history.takeLast(MAX_HISTORY).forEach { msg ->
+            val role = if (msg.role == "assistant") "assistant" else "user"
+            messages.put(JSONObject().put("role", role).put("content", msg.content))
+        }
+        val payload = JSONObject()
+            .put("model", KEYLESS_MODEL)
+            .put("messages", messages)
+            .put("temperature", 0.35)
+            .put("max_tokens", 1024)
+            .put("stream", false)
+        val request = Request.Builder()
+            .url(KEYLESS_URL)
+            .addHeader("Content-Type", "application/json")
+            .post(payload.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        executeRequest(AiProvider.GROQ, request)
+    }
 
     // ---------------------------------------------------------------- helpers
 

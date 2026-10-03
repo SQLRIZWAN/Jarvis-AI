@@ -77,6 +77,7 @@ import com.sqlai.assistant.core.LogBus
 import com.sqlai.assistant.core.LogLevel
 import com.sqlai.assistant.core.PermissionHelper
 import com.sqlai.assistant.core.StateBus
+import com.sqlai.assistant.core.TaskStateManager
 import com.sqlai.assistant.engine.AssistantEngine
 import com.sqlai.assistant.engine.SQLAgentEngineV4
 import com.sqlai.assistant.service.AutonomousCallBridgeService
@@ -177,16 +178,17 @@ fun DashboardScreenV6() {
                     StateBadge(state = state)
                 }
                 Text(
-                    "v${BuildConfig.VERSION_NAME}  ·  24/7 agentic phone assistant",
+                    "v${BuildConfig.VERSION_NAME}  ·  agentic phone assistant",
                     fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.outline
                 )
             }
             Switch(
-                checked = settings?.assistantEnabled == true,
+                checked = settings?.assistantEnabled == true && settings?.listenServiceEnabled == true,
                 onCheckedChange = { checked ->
                     scope.launch {
                         SqlAiApp.settings.setAssistantEnabled(checked)
+                        SqlAiApp.settings.setListenServiceEnabled(checked)
                         if (checked) ListeningService.start(context) else ListeningService.stop(context)
                     }
                 }
@@ -237,13 +239,25 @@ fun DashboardScreenV6() {
                     fontWeight = FontWeight.Medium
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { ListeningService.start(context) }) {
+                    Button(onClick = {
+                        scope.launch {
+                            SqlAiApp.settings.setAssistantEnabled(true)
+                            SqlAiApp.settings.setListenServiceEnabled(true)
+                            ListeningService.start(context)
+                        }
+                    }) {
                         Icon(Icons.Filled.PlayArrow, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Start")
+                        Text("Start 24/7")
                     }
                     Button(
-                        onClick = { ListeningService.stop(context) },
+                        onClick = {
+                            scope.launch {
+                                SqlAiApp.settings.setAssistantEnabled(false)
+                                SqlAiApp.settings.setListenServiceEnabled(false)
+                                ListeningService.stop(context)
+                            }
+                        },
                         colors = androidx.compose.material3.ButtonDefaults.buttonColors(
                             containerColor = SqlError
                         )
@@ -384,6 +398,83 @@ fun DashboardScreenV6() {
                     } else "Idle",
                     modifier = Modifier.weight(1f)
                 )
+            }
+        }
+
+        // -------------------------------------------- task progress (v7.0.3)
+        SectionCard(title = "Task progress") {
+            val journal = remember(permissionTick) { TaskStateManager.snapshot() }
+            if (journal == null) {
+                Text(
+                    "No task in progress - agent is idle. Give a task to start tracking.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            } else {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    MetricCard(
+                        label = "Agent",
+                        value = if (taskState.running) "RUNNING" else journal.status.uppercase(),
+                        modifier = Modifier.weight(1f)
+                    )
+                    MetricCard(
+                        label = "Step",
+                        value = "${journal.step}",
+                        modifier = Modifier.weight(1f)
+                    )
+                    MetricCard(
+                        label = "Done",
+                        value = "${journal.completed.size}/${journal.subgoals.size}",
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    journal.task,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 2
+                )
+                journal.remaining.take(4).forEach { item ->
+                    Text(
+                        "• $item",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.outline,
+                        maxLines = 1
+                    )
+                }
+                if (journal.completed.isNotEmpty()) {
+                    Text(
+                        "Done: ${journal.completed.last()}",
+                        fontSize = 11.sp,
+                        color = SqlSuccess,
+                        maxLines = 1
+                    )
+                }
+                val position = listOfNotNull(
+                    journal.lastAction?.takeIf { it.isNotBlank() }?.let { "action=$it" },
+                    journal.lastPackage?.takeIf { it.isNotBlank() }?.let { "app=$it" }
+                ).joinToString("   ")
+                if (position.isNotBlank()) {
+                    Text(
+                        "Last position: $position",
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.outline,
+                        maxLines = 1
+                    )
+                }
+                journal.failReason?.takeIf { it.isNotBlank() }?.let { reason ->
+                    Text(
+                        "Stuck: $reason",
+                        fontSize = 11.sp,
+                        color = SqlError,
+                        maxLines = 2
+                    )
+                }
             }
         }
 
