@@ -61,7 +61,10 @@ class ListeningService : Service() {
         const val ACTION_STOP = "com.sqlai.assistant.action.STOP"
         const val ACTION_TRIGGER = "com.sqlai.assistant.action.TRIGGER"
         const val ACTION_COMMAND = "com.sqlai.assistant.action.COMMAND"
+        /** v7.0.0.2 push-to-talk: end the held/locked mic burst. */
+        const val ACTION_PTT_STOP = "com.sqlai.assistant.action.PTT_STOP"
         const val EXTRA_TEXT = "text"
+        const val EXTRA_SEND = "send"
 
         private const val NOTIFICATION_ID = 7010
 
@@ -78,6 +81,17 @@ class ListeningService : Service() {
         /** Voice-interaction assist trigger: capture next utterance as a command. */
         fun trigger(context: Context) {
             val intent = Intent(context, ListeningService::class.java).setAction(ACTION_TRIGGER)
+            startSvc(context, intent)
+        }
+
+        /**
+         * v7.0.0.2 push-to-talk end. send=true finalizes the burst (the
+         * captured speech becomes a command), send=false discards it.
+         */
+        fun pttStop(context: Context, send: Boolean) {
+            val intent = Intent(context, ListeningService::class.java)
+                .setAction(ACTION_PTT_STOP)
+                .putExtra(EXTRA_SEND, send)
             startSvc(context, intent)
         }
 
@@ -129,6 +143,8 @@ class ListeningService : Service() {
     @Volatile private var wakeMode = "speech"
     @Volatile private var cachedModelLang = "en"
     @Volatile private var lastVoskTranscript = ""
+    /** v7.0.0.2: PTT/assist window - bypass the speech-pause until it lapses. */
+    @Volatile private var forceRecordUntil = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -168,6 +184,11 @@ class ListeningService : Service() {
                 promoteToForeground()
                 ensureRunning()
                 awaitingCommand = true
+                // v7.0.0.2: user invoked the mic (assist / hold-to-talk) -
+                // cut assistant audio so the burst never records itself.
+                Speaker.interruptPlayback()
+                // PTT: bypass the speech-pause guard - record immediately.
+                forceRecordUntil = System.currentTimeMillis() + 2_000L
                 StateBus.setState(AssistantState.LISTENING)
                 LogBus.log("Assist triggered - waiting for your command")
                 cancelRecognition()
@@ -175,6 +196,31 @@ class ListeningService : Service() {
                 stopVosk()
                 mainHandler.postDelayed({ startRecognition() }, 150)
                 return START_STICKY
+            }
+
+            ACTION_PTT_STOP -> {
+                val send = intent.getBooleanExtra(EXTRA_SEND, true)
+                if (send) {
+                    if (isListening) {
+                        // Finalize: onResults -> evaluateWakeWord -> processCommand.
+                        try {
+                            recognizer?.stopListening()
+                        } catch (e: Exception) {
+                            LogBus.log("PTT stop failed: ${e.message}", LogLevel.WARN)
+                            resumeIdle()
+                        }
+                    } else if (awaitingCommand) {
+                        // Burst never got to record - nothing to send.
+                        resumeIdle()
+                    }
+                } else {
+                    awaitingCommand = false
+                    awaitingAttempts = 0
+                    cancelRecognition()
+                    StateBus.setState(if (running) AssistantState.LISTENING else AssistantState.DISABLED)
+                    LogBus.log("PTT cancelled", LogLevel.INFO)
+                }
+                return START_NOT_STICKY
             }
 
             else -> {
@@ -500,6 +546,8 @@ class ListeningService : Service() {
 
     /** True while the assistant itself is speaking (avoid self-hearing), capped. */
     private fun speechPauseActive(): Boolean {
+        // v7.0.0.2 PTT/assist trigger: record immediately (2s window, self-lapsing)
+        if (System.currentTimeMillis() < forceRecordUntil) return false
         if (!Speaker.isSpeaking()) {
             speechPauseSince = 0L
             return false
@@ -558,9 +606,11 @@ class ListeningService : Service() {
             isListening = true
             listeningSince = System.currentTimeMillis()
             StateBus.setState(AssistantState.LISTENING)
-            // v7 M6 barge-in: the mic now captures USER speech - cut any
-            // remaining assistant audio so the two never fight the speaker.
-            Speaker.interruptPlayback()
+            // v7 M6 barge-in, v7.0.0.2 narrowed: ONLY cut assistant audio
+            // when the user actually invoked a command burst (awaiting).
+            // Idle wake re-arms must never bump playEpoch - that silently
+            // killed every in-flight reply line ("voice gone" field bug).
+            if (awaitingCommand) Speaker.interruptPlayback()
         } catch (e: Exception) {
             isListening = false
             AudioManagerController.releaseMic(AudioManagerController.MicOwner.STT)

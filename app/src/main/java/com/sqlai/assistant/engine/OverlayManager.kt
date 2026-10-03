@@ -19,9 +19,12 @@ import android.widget.TextView
  */
 object OverlayManager {
 
+    private const val AUTO_HIDE_MS = 6_000L
+
     private val handler = Handler(Looper.getMainLooper())
     private var windowManager: WindowManager? = null
     private var bubble: TextView? = null
+    private val autoHide = Runnable { hide() }
 
     fun show(context: Context, text: String) {
         if (!Settings.canDrawOverlays(context)) return
@@ -33,6 +36,7 @@ object OverlayManager {
                     existing.text = text
                     if (existing.parent == null) addView(appContext, existing)
                     existing.visibility = View.VISIBLE
+                    scheduleHide()
                     return@post
                 }
                 val view = TextView(appContext).apply {
@@ -48,6 +52,7 @@ object OverlayManager {
                 }
                 bubble = view
                 addView(appContext, view)
+                scheduleHide()
             } catch (e: Exception) {
                 // Overlay permission revoked mid-flight - ignore.
             }
@@ -55,6 +60,7 @@ object OverlayManager {
     }
 
     fun hide() {
+        handler.removeCallbacks(autoHide)
         handler.post {
             val view = bubble ?: return@post
             try {
@@ -64,6 +70,12 @@ object OverlayManager {
                 // Already detached.
             }
         }
+    }
+
+    /** v7.0.0.2: the chip must never linger over another app forever. */
+    private fun scheduleHide() {
+        handler.removeCallbacks(autoHide)
+        handler.postDelayed(autoHide, AUTO_HIDE_MS)
     }
 
     private fun addView(context: Context, view: View) {
@@ -80,7 +92,11 @@ object OverlayManager {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                // v7.0.0.2 field bug: the chip ate taps (Send could not be
+                // pressed while it floated over WhatsApp). It is status-only
+                // now - every touch passes straight through to the app below.
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL

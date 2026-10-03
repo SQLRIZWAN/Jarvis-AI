@@ -354,7 +354,26 @@ object Speaker {
                 LogBus.log("TTS init error: ${e.message}", LogLevel.WARN)
             }
         }
-        val engine = awaitReady(2500) ?: run {
+        var engine = awaitReady(2500)
+        if (engine == null) {
+            // v7.0.0.2: a dead/failed engine used to stay dead forever -
+            // "aawaz gayab" field bug. Hard-reinit ONCE, then speak or log.
+            LogBus.log("TTS not ready - reinitializing engine", LogLevel.WARN)
+            try {
+                tts?.shutdown()
+            } catch (e: Exception) {
+                Log.w(TAG, "old tts shutdown failed", e)
+            }
+            tts = null
+            ready = false
+            try {
+                init(SqlAiApp.instance)
+            } catch (e: Exception) {
+                LogBus.log("TTS reinit error: ${e.message}", LogLevel.WARN)
+            }
+            engine = awaitReady(3000)
+        }
+        if (engine == null) {
             LogBus.log("TTS not ready - said: $text")
             return
         }

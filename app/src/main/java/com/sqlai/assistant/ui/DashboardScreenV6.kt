@@ -10,6 +10,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,8 +30,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Stop
@@ -54,6 +57,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -128,6 +132,18 @@ fun DashboardScreenV6() {
 
     var manualCommand by remember { mutableStateOf("") }
     var selfTestTick by remember { mutableStateOf(0) }
+    // v7.0.0.2 push-to-talk: holding = recording while pressed, locked = tap
+    // opened the mic and it stays open until Send/Cancel (or mic tap = send).
+    var pttHolding by remember { mutableStateOf(false) }
+    var pttLocked by remember { mutableStateOf(false) }
+    LaunchedEffect(state) {
+        if (state == AssistantState.PROCESSING || state == AssistantState.IDLE ||
+            state == AssistantState.ERROR || state == AssistantState.DISABLED
+        ) {
+            pttLocked = false
+            pttHolding = false
+        }
+    }
     val logListState = rememberLazyListState()
     val scope = AppCrashHandler.safeScope(rememberCoroutineScope())
 
@@ -235,6 +251,100 @@ fun DashboardScreenV6() {
                         Icon(Icons.Filled.Stop, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
                         Text("Stop")
+                    }
+                }
+
+                // ------------------------------------- v7.0.0.2 push-to-talk
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val pttActive = pttHolding || pttLocked
+                    Surface(
+                        shape = CircleShape,
+                        color = if (pttActive) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        modifier = Modifier
+                            .size(56.dp)
+                            .pointerInput(Unit) {
+                                detectTapGestures(onPress = {
+                                    if (pttLocked) {
+                                        // Tap again while locked = send now.
+                                        tryAwaitRelease()
+                                        pttLocked = false
+                                        ListeningService.pttStop(context, send = true)
+                                        return@detectTapGestures
+                                    }
+                                    val t0 = System.currentTimeMillis()
+                                    pttHolding = true
+                                    ListeningService.trigger(context)
+                                    tryAwaitRelease()
+                                    pttHolding = false
+                                    val held = System.currentTimeMillis() - t0
+                                    if (held >= 400) {
+                                        // Hold mode: release = stop + send.
+                                        ListeningService.pttStop(context, send = true)
+                                    } else {
+                                        // Tap mode: lock the mic open.
+                                        pttLocked = true
+                                    }
+                                })
+                            }
+                    ) {
+                        Icon(
+                            Icons.Filled.Mic,
+                            contentDescription = "Hold to talk, tap to lock",
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.padding(14.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = when {
+                                pttHolding -> "Recording - release to send"
+                                pttLocked -> "Mic locked - speak, then Send"
+                                else -> "Hold to talk - tap to lock mic"
+                            },
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = if (pttActive) {
+                                "Tap mic again = send • Cancel below"
+                            } else {
+                                "No wake word needed"
+                            },
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+                }
+                if (pttLocked) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            pttLocked = false
+                            ListeningService.pttStop(context, send = true)
+                        }) {
+                            Icon(Icons.Filled.Send, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Send")
+                        }
+                        Button(
+                            onClick = {
+                                pttLocked = false
+                                ListeningService.pttStop(context, send = false)
+                            },
+                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                containerColor = SqlError
+                            )
+                        ) {
+                            Icon(Icons.Filled.Close, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Cancel")
+                        }
                     }
                 }
             }
